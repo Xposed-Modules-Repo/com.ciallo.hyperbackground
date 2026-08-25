@@ -4,7 +4,9 @@ import android.app.Activity;
 import android.app.Instrumentation;
 import android.os.Bundle;
 import android.view.View;
-import android.view.ViewTreeObserver;
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -13,6 +15,7 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public final class SettingsBackgroundHook implements IXposedHookLoadPackage {
+    private static final Map<Activity, Runnable> PENDING_GLOBAL = Collections.synchronizedMap(new WeakHashMap<>());
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
         if (!BackgroundContract.isSupportedPackage(lpparam.packageName)) return;
@@ -27,8 +30,7 @@ public final class SettingsBackgroundHook implements IXposedHookLoadPackage {
         if (settings) {
             SettingsThemeOverride.install();
             TextColorOverride.install();
-            hookHomeActivity(lpparam.classLoader);
-            hookHomeFragment(lpparam.classLoader);
+            SettingsSearchMaskOverride.install(lpparam.classLoader);
             hookDeviceFragment(lpparam.classLoader);
         }
     }
@@ -97,17 +99,6 @@ public final class SettingsBackgroundHook implements IXposedHookLoadPackage {
                     });
             XposedHelpers.findAndHookMethod(
                     Activity.class,
-                    "onWindowFocusChanged",
-                    boolean.class,
-                    new XC_MethodHook() {
-                        @Override protected void afterHookedMethod(MethodHookParam param) {
-                            if (param.thisObject instanceof Activity && Boolean.TRUE.equals(param.args[0])) {
-                                scheduleGlobal((Activity) param.thisObject);
-                            }
-                        }
-                    });
-            XposedHelpers.findAndHookMethod(
-                    Activity.class,
                     "onStop",
                     new XC_MethodHook() {
                         @Override protected void afterHookedMethod(MethodHookParam param) {
@@ -135,8 +126,6 @@ public final class SettingsBackgroundHook implements IXposedHookLoadPackage {
             className = "com.xiaomi.account.ui.BaseActivity";
         } else if (BackgroundContract.PACKAGE_THEME_MANAGER.equals(lpparam.packageName)) {
             className = "com.android.thememanager.basemodule.base.AbstractBaseActivity";
-        } else if (BackgroundContract.PACKAGE_HOME.equals(lpparam.packageName)) {
-            className = "com.miui.home.settings.MiuiHomeSettingActivity";
         }
         if (className == null) return;
         try {
@@ -160,119 +149,24 @@ public final class SettingsBackgroundHook implements IXposedHookLoadPackage {
 
     private static void scheduleGlobal(final Activity activity) {
         if (activity == null || activity.isFinishing()) return;
-
-        // Try synchronously first so the background can be installed before the first frame.
-        BackgroundApplier.applyGlobal(activity);
-
+        final View decor;
         try {
-            final View decor = activity.getWindow() == null
-                    ? null
-                    : activity.getWindow().getDecorView();
+            decor = activity.getWindow() == null ? null : activity.getWindow().getDecorView();
             if (decor == null) return;
-
-            // HyperOS may draw the stock page for one or two frames before the Xposed
-            // background layer is attached. Gate only the initial draw for a very small
-            // number of attempts; failure always falls through so a bad hook cannot freeze UI.
-            final ViewTreeObserver observer = decor.getViewTreeObserver();
-            if (observer.isAlive()) {
-                observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
-                    int attempts = 0;
-
-                    @Override
-                    public boolean onPreDraw() {
-                        attempts++;
-
-                        boolean ready = BackgroundApplier.ensureGlobalBeforeDraw(activity);
-                        if (ready
-                                || attempts >= 3
-                                || activity.isFinishing()
-                                || activity.isDestroyed()) {
-                            try {
-                                ViewTreeObserver current = decor.getViewTreeObserver();
-                                if (current.isAlive()) current.removeOnPreDrawListener(this);
-                            } catch (Throwable ignored) {}
-                            return true;
-                        }
-
-                        decor.postInvalidateOnAnimation();
-                        return false;
+            synchronized (PENDING_GLOBAL) {
+                if (PENDING_GLOBAL.containsKey(activity)) return;
+                Runnable task = () -> {
+                    synchronized (PENDING_GLOBAL) { PENDING_GLOBAL.remove(activity); }
+                    if (!activity.isFinishing() && !activity.isDestroyed()) {
+                        BackgroundApplier.applyGlobal(activity);
                     }
-                });
+                };
+                PENDING_GLOBAL.put(activity, task);
+                decor.post(task);
             }
-
-            // Keep the existing lifecycle/layout fallbacks for pages that rebuild their
-            // Miuix hierarchy after the first frame.
-            decor.post(() -> {
-                if (!activity.isFinishing() && !activity.isDestroyed()) {
-                    BackgroundApplier.applyGlobal(activity);
-                }
-            });
-            decor.postOnAnimation(() -> {
-                if (!activity.isFinishing() && !activity.isDestroyed()) {
-                    BackgroundApplier.applyGlobal(activity);
-                }
-            });
-            decor.postDelayed(() -> {
-                if (!activity.isFinishing() && !activity.isDestroyed()) {
-                    BackgroundApplier.applyGlobal(activity);
-                }
-            }, 180L);
         } catch (Throwable ignored) {
             BackgroundApplier.applyGlobal(activity);
         }
-    }
-
-    private static void hookHomeActivity(ClassLoader classLoader) {
-        try {
-            XposedHelpers.findAndHookMethod(
-                    "com.android.settings.MiuiSettings",
-                    classLoader,
-                    "onCreate",
-                    Bundle.class,
-                    new XC_MethodHook() {
-                        @Override protected void afterHookedMethod(MethodHookParam param) {
-                            if (param.thisObject instanceof Activity) BackgroundApplier.applyHome((Activity) param.thisObject);
-                        }
-                    });
-            XposedHelpers.findAndHookMethod(
-                    "com.android.settings.MiuiSettings",
-                    classLoader,
-                    "onResume",
-                    new XC_MethodHook() {
-                        @Override protected void afterHookedMethod(MethodHookParam param) {
-                            if (param.thisObject instanceof Activity) BackgroundApplier.applyHome((Activity) param.thisObject);
-                        }
-                    });
-            XposedHelpers.findAndHookMethod(
-                    "com.android.settings.MiuiSettings",
-                    classLoader,
-                    "onStop",
-                    new XC_MethodHook() {
-                        @Override protected void afterHookedMethod(MethodHookParam param) {
-                            if (param.thisObject instanceof Activity) BackgroundApplier.stopHome((Activity) param.thisObject);
-                        }
-                    });
-        } catch (Throwable error) { logHookError("MiuiSettings", error); }
-    }
-
-    private static void hookHomeFragment(ClassLoader classLoader) {
-        try {
-            XposedHelpers.findAndHookMethod(
-                    "com.android.settings.SettingsFragment",
-                    classLoader,
-                    "onViewCreated",
-                    android.view.View.class,
-                    Bundle.class,
-                    new XC_MethodHook() {
-                        @Override protected void afterHookedMethod(MethodHookParam param) {
-                            Object activity = XposedHelpers.callMethod(param.thisObject, "getActivity");
-                            if (activity instanceof Activity
-                                    && "com.android.settings.MiuiSettings".equals(activity.getClass().getName())) {
-                                BackgroundApplier.applyHome((Activity) activity);
-                            }
-                        }
-                    });
-        } catch (Throwable error) { logHookError("SettingsFragment", error); }
     }
 
     private static void hookDeviceFragment(ClassLoader classLoader) {

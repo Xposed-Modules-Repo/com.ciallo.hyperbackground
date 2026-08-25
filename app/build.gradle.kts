@@ -27,8 +27,8 @@ android {
         applicationId = "com.ciallo.hyperbackground"
         minSdk = 33
         targetSdk = 35
-        versionCode = 24
-        versionName = "1.3.8"
+        versionCode = 31
+        versionName = "1.3.9"
     }
 
     buildFeatures {
@@ -68,6 +68,17 @@ android {
     packaging {
         resources.excludes += setOf("META-INF/LICENSE*", "META-INF/NOTICE*")
     }
+}
+
+// 构建前把仓库根目录的 CHANGELOG.md 同步进 assets，作为“本次版本说明”卡片的唯一数据源。
+// 直接写入默认 assets 源集目录，避免向 Android SourceSet 传入 Provider。
+val syncChangelogAsset by tasks.registering(Copy::class) {
+    from(rootProject.file("CHANGELOG.md"))
+    into(layout.projectDirectory.dir("src/main/assets"))
+}
+
+tasks.named("preBuild") {
+    dependsOn(syncChangelogAsset)
 }
 
 dependencies {

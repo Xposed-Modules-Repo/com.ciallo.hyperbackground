@@ -8,7 +8,7 @@ import android.graphics.drawable.Drawable;
 import android.view.View;
 import android.view.Window;
 import android.view.ViewGroup;
-import android.view.ViewTreeObserver;
+import android.view.ViewParent;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import java.util.ArrayList;
@@ -48,24 +48,6 @@ final class BackgroundApplier {
     }
 
     static void stopGlobal(Activity activity) { stopLayer(activity, GLOBAL_SESSION); }
-
-    static boolean ensureGlobalBeforeDraw(Activity activity) {
-        if (activity == null || activity.isFinishing()) return true;
-        try {
-            if (shouldSkipGlobal(activity)) return true;
-
-            BackgroundContract.Source source =
-                    BackgroundContract.query(activity, BackgroundContract.GLOBAL);
-            if (!source.exists) return true;
-
-            applyGlobal(activity);
-            return XposedHelpers.getAdditionalInstanceField(activity, GLOBAL_SESSION) instanceof LayerSession;
-        } catch (Throwable error) {
-            log("ensureGlobalBeforeDraw", error);
-            // Never block rendering indefinitely if a vendor page behaves unexpectedly.
-            return true;
-        }
-    }
 
     static void destroyGlobal(Activity activity) { removeGlobal(activity); }
 
@@ -346,6 +328,30 @@ final class BackgroundApplier {
     }
 
     private static ViewGroup selectLayerHost(Activity activity, ViewGroup content, boolean home) {
+        // MobileNetworkSettings uses MIUIX ActionBarOverlayLayout for page animation.
+        // Keep the custom background outside that animated container so it does not
+        // slide together with the page and create a ghost/double-background frame.
+        if (activity != null
+                && "com.android.phone".equals(activity.getPackageName())
+                && "com.android.phone.settings.MobileNetworkSettings".equals(
+                        activity.getClass().getName())) {
+            try {
+                View windowContent = activity.findViewById(android.R.id.content);
+                if (windowContent instanceof ViewGroup) {
+                    ViewGroup windowHost = (ViewGroup) windowContent;
+                    ViewParent parent = windowHost.getParent();
+
+                    if (parent instanceof ViewGroup
+                            && parent.getClass().getName().contains("ActionBarOverlayLayout")) {
+                        return (ViewGroup) parent;
+                    }
+                    return windowHost;
+                }
+            } catch (Throwable error) {
+                log("selectLayerHost/MobileNetworkSettings", error);
+            }
+        }
+
         if (home || activity == null || content == null) return content;
         try {
             Object parent = content.getParent();
@@ -519,7 +525,6 @@ final class BackgroundApplier {
         final List<Drawable> originalBackgrounds = new ArrayList<>();
         final List<ActionBarSurface> actionBarSurfaces = new ArrayList<>();
         ViewGroup observedRoot;
-        ViewTreeObserver.OnGlobalLayoutListener layoutListener;
         boolean homeMode;
         boolean transparentTopBar;
         Window statusBarWindow;
@@ -534,9 +539,7 @@ final class BackgroundApplier {
                 clearedViews.add(view);
                 originalBackgrounds.add(view.getBackground());
             }
-            // Miuix can re-apply theme backgrounds after the first lifecycle callback.
-            // Always null the current value while preserving only the first original value.
-            view.setBackground(null);
+            if (view.getBackground() != null) view.setBackground(null);
         }
 
         void attach(final Activity activity, ViewGroup root, boolean home, boolean transparentTopBar) {
@@ -545,12 +548,6 @@ final class BackgroundApplier {
             this.transparentTopBar = transparentTopBar;
             if (transparentTopBar) prepareTransparentStatusBar(activity);
             refresh(activity, home);
-            layoutListener = new ViewTreeObserver.OnGlobalLayoutListener() {
-                @Override public void onGlobalLayout() {
-                    try { refresh(activity, homeMode); } catch (Throwable ignored) {}
-                }
-            };
-            try { root.getViewTreeObserver().addOnGlobalLayoutListener(layoutListener); } catch (Throwable ignored) {}
         }
 
         void refresh(Activity activity, boolean home) {
@@ -560,14 +557,7 @@ final class BackgroundApplier {
         }
 
         void detach() {
-            if (observedRoot != null && layoutListener != null) {
-                try {
-                    ViewTreeObserver observer = observedRoot.getViewTreeObserver();
-                    if (observer.isAlive()) observer.removeOnGlobalLayoutListener(layoutListener);
-                } catch (Throwable ignored) {}
-            }
             observedRoot = null;
-            layoutListener = null;
         }
 
         void restore() {
