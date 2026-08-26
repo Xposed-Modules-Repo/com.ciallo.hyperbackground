@@ -27,8 +27,9 @@ android {
         applicationId = "com.ciallo.hyperbackground"
         minSdk = 33
         targetSdk = 35
-        versionCode = 31
-        versionName = "1.3.9"
+        versionCode = 34
+        versionName = "1.4.0"
+        resourceConfigurations += listOf("en", "zh-rCN")
     }
 
     buildFeatures {
@@ -94,6 +95,7 @@ dependencies {
     implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.3")
 
-    compileOnly(files("libs/xposed-stubs.jar"))
+    compileOnly("io.github.libxposed:api:101.0.1")
+    implementation("io.github.libxposed:service:101.0.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
