@@ -47,11 +47,14 @@ public final class BackgroundContract {
     public static final String UI_BG_BLUR_ENABLED = "ui_bg_blur_enabled";
     public static final String UI_BG_BLUR_RADIUS = "ui_bg_blur_radius";
     public static final String UI_CARD_OPACITY = "ui_card_opacity";
+    public static final String UI_BOTTOM_BAR_BLUR_ENABLED = "ui_bottom_bar_blur_enabled";
+    public static final String UI_FLOATING_BOTTOM_BAR = "ui_floating_bottom_bar";
     public static final String UI_TOP_BLUR_ENABLED = "ui_top_blur_enabled";
     public static final String UI_TOP_BLUR_STRENGTH = "ui_top_blur_strength";
     public static final String UI_SAYING_ENABLED = "ui_saying_enabled";
     public static final String UI_SAYING_API = "ui_saying_api";
     public static final String UI_SAYING_KEY = "ui_saying_key";
+    public static final String UI_IGNORED_UPDATE_VERSION = "ui_ignored_update_version";
     static final String UI_SCROLL_Y = "ui_scroll_y";
     public static final int UI_THEME_FOLLOW = 0;
     public static final int UI_THEME_LIGHT = 1;

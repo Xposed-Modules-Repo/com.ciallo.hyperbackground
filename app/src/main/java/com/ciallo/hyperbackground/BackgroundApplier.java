@@ -520,6 +520,14 @@ final class BackgroundApplier {
     private static void log(String stage, Throwable error) { XposedBridge.log("[HyperBackground] " + stage + " failed: " + error); XposedBridge.log(error); }
 
     private static final class LayerSession {
+        // Some external-settings pages (security center 应用设置/隐私与安全) build their top/stat
+        // cards asynchronously (permission usage is loaded after the first frame), so a single
+        // clear at attach/refresh time runs before those opaque neutral panels exist or are
+        // measured, leaving black/white blocks until the next onResume. Keep re-clearing on
+        // every layout pass for a short budget after the page appears so late-inflated panels
+        // are caught without a manual re-entry, then detach the observer to avoid overhead.
+        private static final long RESCAN_WINDOW_MS = 2500L;
+
         final BackgroundMediaView media;
         final List<View> clearedViews = new ArrayList<>();
         final List<Drawable> originalBackgrounds = new ArrayList<>();
@@ -530,6 +538,9 @@ final class BackgroundApplier {
         Window statusBarWindow;
         int originalStatusBarColor;
         boolean statusBarColorSaved;
+        Activity observedActivity;
+        android.view.ViewTreeObserver.OnGlobalLayoutListener layoutListener;
+        long rescanDeadline;
 
         LayerSession(BackgroundMediaView media) { this.media = media; }
 
@@ -544,6 +555,7 @@ final class BackgroundApplier {
 
         void attach(final Activity activity, ViewGroup root, boolean home, boolean transparentTopBar) {
             observedRoot = root;
+            observedActivity = activity;
             homeMode = home;
             this.transparentTopBar = transparentTopBar;
             if (transparentTopBar) prepareTransparentStatusBar(activity);
@@ -554,10 +566,50 @@ final class BackgroundApplier {
             if (home || activity == null || observedRoot == null) return;
             clearPageSurfaces(activity, observedRoot, observedRoot, 0);
             if (transparentTopBar) clearActionBarSurfaces(activity, observedRoot, 0);
+            // Reopen the rescan window on every refresh (e.g. returning from a sub-page) so a
+            // page re-entered after its cards were recycled is cleaned up again automatically.
+            observedActivity = activity;
+            rescanDeadline = android.os.SystemClock.uptimeMillis() + RESCAN_WINDOW_MS;
+            if (layoutListener == null) installLayoutRescan(activity, observedRoot);
+        }
+
+        // Watch layout passes on the observed root: opaque neutral panels created after the
+        // first frame (async permission stats etc.) trigger a fresh clear. The listener is
+        // self-limiting — it detaches once the rescan window elapses so long-lived pages do
+        // not pay for a global-layout callback forever.
+        private void installLayoutRescan(final Activity activity, final ViewGroup root) {
+            if (root == null) return;
+            try {
+                final android.view.ViewTreeObserver observer = root.getViewTreeObserver();
+                if (observer == null || !observer.isAlive()) return;
+                rescanDeadline = android.os.SystemClock.uptimeMillis() + RESCAN_WINDOW_MS;
+                layoutListener = () -> {
+                    if (observedRoot == null || observedActivity == null) { removeLayoutRescan(); return; }
+                    if (observedActivity.isFinishing() || observedActivity.isDestroyed()) { removeLayoutRescan(); return; }
+                    clearPageSurfaces(observedActivity, observedRoot, observedRoot, 0);
+                    if (transparentTopBar) clearActionBarSurfaces(observedActivity, observedRoot, 0);
+                    if (android.os.SystemClock.uptimeMillis() > rescanDeadline) removeLayoutRescan();
+                };
+                observer.addOnGlobalLayoutListener(layoutListener);
+            } catch (Throwable ignored) {}
+        }
+
+        private void removeLayoutRescan() {
+            if (layoutListener == null) return;
+            try {
+                ViewGroup root = observedRoot;
+                if (root != null) {
+                    android.view.ViewTreeObserver observer = root.getViewTreeObserver();
+                    if (observer != null && observer.isAlive()) observer.removeOnGlobalLayoutListener(layoutListener);
+                }
+            } catch (Throwable ignored) {}
+            layoutListener = null;
         }
 
         void detach() {
+            removeLayoutRescan();
             observedRoot = null;
+            observedActivity = null;
         }
 
         void restore() {
@@ -686,6 +738,19 @@ final class BackgroundApplier {
                 return true;
             }
 
+            // Some external-settings pages (security center 应用设置/隐私与安全) place opaque
+            // neutral ColorDrawable panels around their cards (e.g. top_container/top_view,
+            // the stat-card ConstraintLayout). In dark mode they read as black blocks and in
+            // light mode as white blocks over the wallpaper. Clear only fully-opaque neutral
+            // solid colors (black/white/grey); semi-transparent card surfaces (e.g. #24FFFFFF
+            // GradientDrawable/CardDrawable) and coloured controls are intentionally kept.
+            if (externalSettingsPage
+                    && width >= (int) (rootWidth * 0.5f)
+                    && height >= (int) (rootHeight * 0.05f)
+                    && isOpaqueNeutralColorDrawable(bg)) {
+                return true;
+            }
+
             if (!large) return false;
 
             String cls = view.getClass().getName().toLowerCase();
@@ -718,6 +783,50 @@ final class BackgroundApplier {
             if (value == null || value.isEmpty()) return false;
             for (String needle : needles) if (value.contains(needle)) return true;
             return false;
+        }
+
+        // True only for a fully-opaque neutral (black/white/grey) solid background.
+        // Handles ColorDrawable directly; for any other drawable (LayerDrawable,
+        // GradientDrawable, etc.) it samples a *copy* rendered to a 1x1 bitmap so we read
+        // the real composited colour without mutating the shared drawable (beta5 broke the
+        // grey cards by calling setBounds on the live instance — this copies first).
+        // Semi-transparent surfaces (e.g. #24FFFFFF cards) sample with alpha < 255 and are
+        // rejected; coloured panels are non-neutral and rejected.
+        private boolean isOpaqueNeutralColorDrawable(Drawable bg) {
+            if (bg == null) return false;
+            if (bg instanceof android.graphics.drawable.ColorDrawable) {
+                return isOpaqueNeutral(((android.graphics.drawable.ColorDrawable) bg).getColor());
+            }
+            Integer sampled = sampleDrawableColor(bg);
+            return sampled != null && isOpaqueNeutral(sampled);
+        }
+
+        // Renders a COPY of the drawable to a 1x1 bitmap and reads the pixel. Never touches
+        // the original drawable (no setBounds/draw on the live instance).
+        private Integer sampleDrawableColor(Drawable bg) {
+            try {
+                Drawable.ConstantState state = bg.getConstantState();
+                if (state == null) return null;
+                Drawable copy = state.newDrawable().mutate();
+                android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(1, 1, android.graphics.Bitmap.Config.ARGB_8888);
+                android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
+                copy.setBounds(0, 0, 1, 1);
+                copy.draw(canvas);
+                int color = bmp.getPixel(0, 0);
+                bmp.recycle();
+                return color;
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+
+        // Fully opaque and neutral (channels close together, no dominant hue): black/white/grey.
+        private boolean isOpaqueNeutral(int color) {
+            if (Color.alpha(color) != 255) return false;
+            int r = Color.red(color), g = Color.green(color), b = Color.blue(color);
+            int max = Math.max(r, Math.max(g, b));
+            int min = Math.min(r, Math.min(g, b));
+            return (max - min) <= 24;
         }
     }
     private static final class ActionBarSurface {

@@ -27,6 +27,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
@@ -42,26 +43,35 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.ciallo.hyperbackground.BackgroundContract
 import com.ciallo.hyperbackground.ConfigManager
 import com.ciallo.hyperbackground.R
 import com.ciallo.hyperbackground.ui.pages.BackgroundDetailPage
+import com.ciallo.hyperbackground.ui.pages.ChangelogPage
 import com.ciallo.hyperbackground.ui.pages.HomePage
 import com.ciallo.hyperbackground.ui.pages.SettingsPage
 import com.ciallo.hyperbackground.ui.pages.RestartScopesDialog
+import com.ciallo.hyperbackground.ui.pages.UpdateAvailableDialog
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.FloatingNavigationBar
+import top.yukonga.miuix.kmp.basic.FloatingNavigationBarItem
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.NavigationBar
 import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.basic.rememberTopAppBarState
+import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
+import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.Home
@@ -78,6 +88,10 @@ class MainActivity : ComponentActivity() {
         private set
     var cardOpacity by mutableFloatStateOf(1f)
         private set
+    var bottomBarBlurEnabled by mutableStateOf(false)
+        private set
+    var floatingBottomBar by mutableStateOf(false)
+        private set
     private var pendingMediaResult: ((Uri, String) -> Unit)? = null
 
     private val picker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -92,6 +106,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         config = ConfigManager.get(this)
         cardOpacity = config.getInt(BackgroundContract.UI_CARD_OPACITY, 100).coerceIn(0, 100) / 100f
+        bottomBarBlurEnabled = config.getBoolean(BackgroundContract.UI_BOTTOM_BAR_BLUR_ENABLED, false)
+        floatingBottomBar = config.getBoolean(BackgroundContract.UI_FLOATING_BOTTOM_BAR, false)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent { HyperBackgroundApp() }
     }
@@ -154,6 +170,16 @@ class MainActivity : ComponentActivity() {
         config.edit().putInt(BackgroundContract.UI_CARD_OPACITY, (cardOpacity * 100).toInt()).apply()
     }
 
+    fun updateBottomBarBlur(enabled: Boolean) {
+        bottomBarBlurEnabled = enabled
+        config.edit().putBoolean(BackgroundContract.UI_BOTTOM_BAR_BLUR_ENABLED, enabled).apply()
+    }
+
+    fun updateFloatingBottomBar(enabled: Boolean) {
+        floatingBottomBar = enabled
+        config.edit().putBoolean(BackgroundContract.UI_FLOATING_BOTTOM_BAR, enabled).apply()
+    }
+
     fun refreshUi() { revision++ }
 
     fun openUrl(url: String) {
@@ -202,7 +228,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
             Box(Modifier.fillMaxSize().background(MiuixTheme.colorScheme.surface)) {
-                ModuleBackground(revision)
                 AppNavigation(
                     themeMode = themeMode,
                     themeColorEnabled = themeColorEnabled,
@@ -227,6 +252,7 @@ class MainActivity : ComponentActivity() {
                             .putBoolean(BackgroundContract.UI_MONET, false).apply()
                     },
                 )
+                UpdateAvailableDialog(this@MainActivity)
             }
         }
     }
@@ -270,8 +296,8 @@ class MainActivity : ComponentActivity() {
             },
             label = "screen-navigation",
         ) { slot ->
-            if (slot == null) {
-                MainTabs(
+            when (slot) {
+                null -> MainTabs(
                     themeMode = themeMode,
                     themeColorEnabled = themeColorEnabled,
                     monet = monet,
@@ -281,9 +307,16 @@ class MainActivity : ComponentActivity() {
                     onMonet = onMonet,
                     onAccent = onAccent,
                     onOpenBackground = { detailSlot = it },
+                    onOpenChangelog = { detailSlot = ROUTE_CHANGELOG },
                 )
-            } else {
-                BackgroundDetailScreen(slot = slot, onBack = { detailSlot = null })
+                ROUTE_CHANGELOG -> Box(Modifier.fillMaxSize()) {
+                    ModuleBackground(revision)
+                    ChangelogScreen(onBack = { detailSlot = null })
+                }
+                else -> Box(Modifier.fillMaxSize()) {
+                    ModuleBackground(revision)
+                    BackgroundDetailScreen(slot = slot, onBack = { detailSlot = null })
+                }
             }
         }
     }
@@ -299,76 +332,127 @@ class MainActivity : ComponentActivity() {
         onMonet: (Boolean) -> Unit,
         onAccent: (Int) -> Unit,
         onOpenBackground: (String) -> Unit,
+        onOpenChangelog: () -> Unit,
     ) {
         val pagerState = rememberPagerState(pageCount = { 2 })
         val scope = rememberCoroutineScope()
+        val backgroundColor = MiuixTheme.colorScheme.surface
+        val backdrop = if (bottomBarBlurEnabled) {
+            rememberLayerBackdrop {
+                drawRect(backgroundColor)
+                drawContent()
+            }
+        } else {
+            null
+        }
         var showRestartDialog by remember { mutableStateOf(false) }
         Scaffold(
             containerColor = Color.Transparent,
             bottomBar = {
-                NavigationBar(
-                    color = MiuixTheme.colorScheme.surface.copy(alpha = cardOpacity),
-                    showDivider = false,
-                ) {
-                    NavigationBarItem(
-                        selected = pagerState.currentPage == 0,
-                        onClick = { scope.launch { pagerState.animateScrollToPage(0) } },
-                        icon = MiuixIcons.Home,
-                        label = getString(R.string.nav_home),
+                val barModifier = if (backdrop != null) {
+                    Modifier.textureBlur(
+                        backdrop = backdrop,
+                        shape = RoundedCornerShape(if (floatingBottomBar) 50.dp else 0.dp),
                     )
-                    NavigationBarItem(
-                        selected = pagerState.currentPage == 1,
-                        onClick = { scope.launch { pagerState.animateScrollToPage(1) } },
-                        icon = MiuixIcons.Settings,
-                        label = getString(R.string.nav_settings),
-                    )
+                } else {
+                    Modifier
+                }
+                val color = if (backdrop != null) {
+                    Color.Transparent
+                } else {
+                    MiuixTheme.colorScheme.surface.copy(alpha = cardOpacity)
+                }
+                if (floatingBottomBar) {
+                    FloatingNavigationBar(
+                        modifier = barModifier.zIndex(2f),
+                        color = color,
+                    ) {
+                        FloatingNavigationBarItem(
+                            selected = pagerState.currentPage == 0,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(0) } },
+                            icon = MiuixIcons.Home,
+                            label = getString(R.string.nav_home),
+                        )
+                        FloatingNavigationBarItem(
+                            selected = pagerState.currentPage == 1,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(1) } },
+                            icon = MiuixIcons.Settings,
+                            label = getString(R.string.nav_settings),
+                        )
+                    }
+                } else {
+                    NavigationBar(
+                        modifier = barModifier.zIndex(2f),
+                        color = color,
+                        showDivider = false,
+                    ) {
+                        NavigationBarItem(
+                            selected = pagerState.currentPage == 0,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(0) } },
+                            icon = MiuixIcons.Home,
+                            label = getString(R.string.nav_home),
+                        )
+                        NavigationBarItem(
+                            selected = pagerState.currentPage == 1,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(1) } },
+                            icon = MiuixIcons.Settings,
+                            label = getString(R.string.nav_settings),
+                        )
+                    }
                 }
             },
         ) { bottomPadding ->
-            HorizontalPager(
-                state = pagerState,
-                modifier = Modifier.fillMaxSize(),
-                beyondViewportPageCount = 1,
-            ) { page ->
-                when (page) {
-                    0 -> MainPageScaffold(
-                        title = getString(R.string.nav_home),
-                        bottomPadding = bottomPadding,
-                        actions = {
-                            IconButton(onClick = { showRestartDialog = true }) {
-                                Icon(MiuixIcons.Refresh, contentDescription = getString(R.string.restart_scope))
-                            }
-                        },
-                    ) { padding, scrollModifier ->
-                        HomePage(
-                            modifier = scrollModifier,
-                            padding = padding,
-                            revision = revision,
-                            onOpenBackground = onOpenBackground,
-                        )
-                    }
-                    else -> MainPageScaffold(
-                        title = getString(R.string.nav_settings),
-                        bottomPadding = bottomPadding,
-                        actions = {
-                            IconButton(onClick = { showRestartDialog = true }) {
-                                Icon(MiuixIcons.Refresh, contentDescription = getString(R.string.restart_scope))
-                            }
-                        },
-                    ) { padding, scrollModifier ->
-                        SettingsPage(
-                            activity = this@MainActivity,
-                            modifier = scrollModifier,
-                            padding = padding,
-                            themeMode = themeMode,
-                            themeColorEnabled = themeColorEnabled,
-                            monet = monet,
-                            accent = accent,
-                            onThemeMode = onThemeMode,
-                            onThemeColorEnabled = onThemeColorEnabled,
-                            onMonet = onMonet,
-                            onAccent = onAccent,
-                        )
+            Box(
+                Modifier.fillMaxSize()
+                    .then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier),
+            ) {
+                ModuleBackground(revision)
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier.fillMaxSize(),
+                    beyondViewportPageCount = 1,
+                ) { page ->
+                    when (page) {
+                        0 -> MainPageScaffold(
+                            title = getString(R.string.nav_home),
+                            bottomPadding = bottomPadding,
+                            actions = {
+                                IconButton(onClick = { showRestartDialog = true }) {
+                                    Icon(MiuixIcons.Refresh, contentDescription = getString(R.string.restart_scope))
+                                }
+                            },
+                        ) { padding, scrollModifier ->
+                            HomePage(
+                                modifier = scrollModifier,
+                                padding = padding,
+                                revision = revision,
+                                onOpenBackground = onOpenBackground,
+                            )
+                        }
+                        else -> MainPageScaffold(
+                            title = getString(R.string.nav_settings),
+                            bottomPadding = bottomPadding,
+                            actions = {
+                                IconButton(onClick = { showRestartDialog = true }) {
+                                    Icon(MiuixIcons.Refresh, contentDescription = getString(R.string.restart_scope))
+                                }
+                            },
+                        ) { padding, scrollModifier ->
+                            SettingsPage(
+                                activity = this@MainActivity,
+                                modifier = scrollModifier,
+                                padding = padding,
+                                themeMode = themeMode,
+                                themeColorEnabled = themeColorEnabled,
+                                monet = monet,
+                                accent = accent,
+                                onThemeMode = onThemeMode,
+                                onThemeColorEnabled = onThemeColorEnabled,
+                                onMonet = onMonet,
+                                onAccent = onAccent,
+                                onOpenChangelog = onOpenChangelog,
+                            )
+                        }
                     }
                 }
             }
@@ -457,6 +541,40 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun ChangelogScreen(onBack: () -> Unit) {
+        val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
+        val hasUiBackground = remember(revision) { config.uiBackgroundFile.isFile }
+        val topBarColor = if (hasUiBackground) {
+            Color.Transparent
+        } else {
+            MiuixTheme.colorScheme.surface.copy(alpha = cardOpacity)
+        }
+        val title = getString(R.string.changelog)
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    color = topBarColor,
+                    title = title,
+                    largeTitle = title,
+                    scrollBehavior = scrollBehavior,
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(MiuixIcons.Back, contentDescription = getString(R.string.back))
+                        }
+                    },
+                )
+            },
+        ) { padding ->
+            ChangelogPage(
+                activity = this@MainActivity,
+                modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+                padding = padding,
+            )
+        }
+    }
+
+    @Composable
     private fun ModuleBackground(revision: Int) {
         val file = remember(revision) { config.uiBackgroundFile }
         if (!file.isFile) return
@@ -482,5 +600,11 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+    }
+
+    private companion object {
+        // 二级页导航哨兵：复用 detailSlot 的 AnimatedContent/返回动画承载更新日志页，
+        // 取一个不会与背景 slot（home/device/global）冲突的值。
+        const val ROUTE_CHANGELOG = "__changelog__"
     }
 }
