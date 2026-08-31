@@ -58,6 +58,9 @@ import top.yukonga.miuix.kmp.preference.SwitchPreference
 fun BackgroundPickerPreference(
     activity: MainActivity,
     slot: String? = null,
+    // 入口/对话框标题可覆盖（默认「设置背景」）：设备卡片页复用本组件时传入「动态背景（可调透明度）」。
+    title: String? = null,
+    summary: String? = null,
 ) {
     val config = activity.config
     val currentFile = if (slot == null) config.uiBackgroundFile else config.backgroundFile(slot)
@@ -82,9 +85,12 @@ fun BackgroundPickerPreference(
         mutableFloatStateOf(config.getInt(radiusKey, 20).coerceIn(0, 80).toFloat())
     }
 
+    val entryTitle = title ?: stringResource(R.string.set_background)
+    val entrySummary = summary ?: stringResource(R.string.set_background_summary)
+
     BasicComponent(
-        title = stringResource(R.string.set_background),
-        summary = stringResource(R.string.set_background_summary),
+        title = entryTitle,
+        summary = entrySummary,
         endActions = {
             Icon(imageVector = MiuixIcons.Basic.ArrowRight, contentDescription = null)
         },
@@ -92,7 +98,7 @@ fun BackgroundPickerPreference(
     )
 
     WindowDialog(
-        title = stringResource(R.string.set_background),
+        title = entryTitle,
         summary = stringResource(R.string.background_dialog_summary),
         show = showDialog,
         onDismissRequest = {
@@ -259,4 +265,82 @@ private fun humanSize(bytes: Long): String = when {
     bytes >= 1_048_576 -> String.format("%.1f MB", bytes / 1_048_576f)
     bytes >= 1_024 -> String.format("%.1f KB", bytes / 1_024f)
     else -> "$bytes B"
+}
+
+/**
+ * 外观槽位的「带预览」选图行：结构与 [BackgroundPickerPreference] 一致（BasicComponent 入口 + 预览对话框），
+ * 但数据源接外观子系统（[MainActivity.appearanceImageFile] / [MainActivity.chooseAppearanceImage] /
+ * [MainActivity.clearAppearanceImage]）。对话框仅保留「预览 + 点击换图 + 清除」，不含不透明度/模糊
+ * （外观各槽位的缩放/偏移参数在页面里单独调节）。
+ *
+ * @param slot 外观图片槽位（APPEARANCE_SLOT_*）。
+ * @param logo 是否为 LOGO 类槽位；为真时允许导入 SVG/XML（此时预览无法解码，显示占位文字）。
+ */
+@Composable
+fun AppearancePickerPreference(
+    activity: MainActivity,
+    slot: String,
+    title: String,
+    summary: String,
+    logo: Boolean = false,
+) {
+    var showDialog by remember { mutableStateOf(false) }
+    // 以 appearanceRevision 作为刷新键：导入/清除写库后自增，触发预览重新读取落盘文件。
+    val currentFile = remember(activity.appearanceRevision, showDialog) { activity.appearanceImageFile(slot) }
+    val imported = currentFile.isFile
+
+    BasicComponent(
+        title = title,
+        summary = summary,
+        endActions = {
+            Icon(imageVector = MiuixIcons.Basic.ArrowRight, contentDescription = null)
+        },
+        onClick = { showDialog = true },
+    )
+
+    WindowDialog(
+        title = title,
+        summary = stringResource(R.string.background_dialog_summary),
+        show = showDialog,
+        onDismissRequest = { showDialog = false },
+    ) {
+        val dismiss = LocalDismissState.current
+        Column(
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            BackgroundPreview(
+                activity = activity,
+                file = currentFile,
+                uri = null,
+                mime = "image/*",
+                onClick = { activity.chooseAppearanceImage(slot, logo) { dismiss?.invoke() } },
+            )
+            Text(
+                text = if (imported) {
+                    stringResource(R.string.enabled_size, humanSize(currentFile.length()))
+                } else {
+                    stringResource(R.string.image_not_imported)
+                },
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+            androidx.compose.foundation.layout.Spacer(Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                TextButton(
+                    text = stringResource(R.string.restore_default),
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        activity.clearAppearanceImage(slot)
+                        dismiss?.invoke()
+                    },
+                )
+                TextButton(
+                    text = stringResource(R.string.choose_media),
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                    onClick = { activity.chooseAppearanceImage(slot, logo) { dismiss?.invoke() } },
+                )
+            }
+        }
+    }
 }

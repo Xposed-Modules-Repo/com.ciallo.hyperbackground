@@ -15,16 +15,22 @@ public final class BackgroundContract {
     public static final String PACKAGE_SECURITY_CENTER = "com.miui.securitycenter";
     public static final String PACKAGE_POWER_KEEPER = "com.miui.powerkeeper";
     public static final String PACKAGE_MI_SETTINGS = "com.xiaomi.misettings";
+    public static final String PACKAGE_CONTACTS = "com.android.contacts";
 
     private static final String[] SUPPORTED_PACKAGES = new String[] {
             PACKAGE_SETTINGS, PACKAGE_MILINK, PACKAGE_PHONE, PACKAGE_ACCOUNT,
             PACKAGE_THEME_MANAGER, PACKAGE_HOME, PACKAGE_SECURITY_CENTER,
-            PACKAGE_POWER_KEEPER, PACKAGE_MI_SETTINGS
+            PACKAGE_POWER_KEEPER, PACKAGE_MI_SETTINGS, PACKAGE_CONTACTS
     };
 
     public static final String HOME = "home";
     public static final String DEVICE = "device";
     public static final String GLOBAL = "global";
+    // 通讯录与拨号（com.android.contacts）主界面背景通道，与 home/device/global 同构。
+    public static final String CONTACTS = "contacts";
+    // 拨号盘独立背景通道：与 contacts 同构的一条媒体通道，但只注入到拨号盘键盘容器（DialpadLayout）内，
+    // 与 contacts 整页背景叠加共存——整页背景照旧，拨号盘弹出时在键盘区额外叠这张图。
+    public static final String CONTACTS_DIALPAD = "contacts_dialpad";
     public static final String PREFS = "backgrounds";
     public static final String MIME_PREFIX = "mime_";
     public static final String SIZE_PREFIX = "size_";
@@ -37,6 +43,26 @@ public final class BackgroundContract {
     static final String DEVICE_LOGO_TEXT = "device_logo_text";
     static final String DEVICE_LOGO_COLOR = "device_logo_color";
     public static final String SETTINGS_THEME_MODE = "settings_theme_mode";
+    // 通讯录与拨号「拨号盘 / 列表适配」：开关开启后清除列表纯黑底、并把拨号盘键盘面板设为半透明。
+    public static final String CONTACTS_SURFACE_ADAPT = "contacts_surface_adapt";
+    // 拨号盘键盘面板不透明度（0-100，默认 60），仅在适配开关开启时生效。
+    public static final String CONTACTS_DIALPAD_OPACITY = "contacts_dialpad_opacity";
+    // 拨号盘背景模式：默认（用系统原生拨号盘底、仅按上面的不透明度设 alpha）/ 自定义（叠加用户选的图）。
+    public static final String CONTACTS_DIALPAD_BG_MODE = "contacts_dialpad_bg_mode";
+    public static final int CONTACTS_DIALPAD_BG_DEFAULT = 0;
+    public static final int CONTACTS_DIALPAD_BG_CUSTOM = 1;
+    // 拨号盘自定义背景在拨号盘区域内的定位焦点（0=左/上，50=居中，100=右/下），默认居中。
+    // 放大时决定取景、缩小时决定摆放位置，让图可在区域内横纵向自由定位。
+    public static final String CONTACTS_DIALPAD_FOCUS_X = "contacts_dialpad_focus_x";
+    public static final String CONTACTS_DIALPAD_FOCUS_Y = "contacts_dialpad_focus_y";
+    // 拨号盘自定义背景缩放大小（1-200，100=等比贴满基准，>100 放大溢出裁切、<100 缩小四周留边）。
+    public static final String CONTACTS_DIALPAD_ZOOM = "contacts_dialpad_zoom";
+    public static final int CONTACTS_DIALPAD_ZOOM_MIN = 1;
+    public static final int CONTACTS_DIALPAD_ZOOM_MAX = 200;
+    public static final int CONTACTS_DIALPAD_ZOOM_DEFAULT = 100;
+    // 通讯录与拨号进程专属深浅色（与全局强制深浅色独立并存，仅作用于 com.android.contacts 进程）。
+    // 三态取值复用 SETTINGS_THEME_FOLLOW/LIGHT/DARK。
+    public static final String CONTACTS_THEME_MODE = "contacts_theme_mode";
 
     public static final String UI_MONET = "ui_monet";
     public static final String UI_THEME_COLOR_ENABLED = "ui_theme_color_enabled";
@@ -80,7 +106,8 @@ public final class BackgroundContract {
     }
 
     public static String remoteMediaName(String slot) {
-        if (!HOME.equals(slot) && !DEVICE.equals(slot) && !GLOBAL.equals(slot)) {
+        if (!HOME.equals(slot) && !DEVICE.equals(slot) && !GLOBAL.equals(slot)
+                && !CONTACTS.equals(slot) && !CONTACTS_DIALPAD.equals(slot)) {
             throw new IllegalArgumentException("Unknown background slot: " + slot);
         }
         return "background_" + slot + ".bin";
@@ -90,6 +117,15 @@ public final class BackgroundContract {
         SharedPreferences prefs = HookRuntime.preferences();
         long size = prefs.getLong(SIZE_PREFIX + slot, -1L);
         long modified = prefs.getLong(MODIFIED_PREFIX + slot, -1L);
+        // 横纵向定位焦点、缩放大小仅对「拨号盘自定义背景」通道生效；其它通道（home/device/global/contacts
+        // 整页背景等）必须用中性默认值（焦点居中 + zoom=100=等比贴满不额外缩放），否则调拨号盘的
+        // 「缩放/位置」会把这些全局键读进整页背景的 Source，导致整页背景也被一起缩放位移。
+        boolean isDialpad = CONTACTS_DIALPAD.equals(slot);
+        // 屏幕坐标系定位：横向恒居中铺满，focusX 不再由 UI 控制、恒为 50；纵向偏移由 focusY 决定。
+        int focusX = 50;
+        int focusY = isDialpad ? prefs.getInt(CONTACTS_DIALPAD_FOCUS_Y, 50) : 50;
+        int zoom = isDialpad ? prefs.getInt(CONTACTS_DIALPAD_ZOOM, CONTACTS_DIALPAD_ZOOM_DEFAULT)
+                : CONTACTS_DIALPAD_ZOOM_DEFAULT;
         return new Source(
                 slot,
                 prefs.getString(MIME_PREFIX + slot, "application/octet-stream"),
@@ -103,7 +139,10 @@ public final class BackgroundContract {
                 prefs.getInt(DEVICE_LOGO_MODE, DEVICE_LOGO_SYSTEM),
                 prefs.getString(DEVICE_LOGO_TEXT, "HyperOS"),
                 prefs.getInt(DEVICE_LOGO_COLOR, 0xFF111111),
-                prefs.getInt(SETTINGS_THEME_MODE, SETTINGS_THEME_FOLLOW)
+                prefs.getInt(SETTINGS_THEME_MODE, SETTINGS_THEME_FOLLOW),
+                focusX,
+                focusY,
+                zoom
         );
     }
 
@@ -125,10 +164,15 @@ public final class BackgroundContract {
         final String deviceLogoText;
         final int deviceLogoColor;
         final int settingsThemeMode;
+        // 拨号盘自定义背景专用：横纵向定位焦点、缩放大小（其它通道用默认值 50/50/100，行为与旧版一致）。
+        final int focusX;
+        final int focusY;
+        final int zoom;
 
         Source(String slot, String mime, long size, long modified, boolean exists,
                int opacity, boolean blurEnabled, int blurRadius, int fontMode,
-               int deviceLogoMode, String deviceLogoText, int deviceLogoColor, int settingsThemeMode) {
+               int deviceLogoMode, String deviceLogoText, int deviceLogoColor, int settingsThemeMode,
+               int focusX, int focusY, int zoom) {
             this.slot = slot;
             this.mime = mime == null ? "application/octet-stream" : mime;
             this.size = size;
@@ -142,6 +186,9 @@ public final class BackgroundContract {
             this.deviceLogoText = deviceLogoText == null ? "HyperOS" : deviceLogoText;
             this.deviceLogoColor = deviceLogoColor;
             this.settingsThemeMode = settingsThemeMode;
+            this.focusX = Math.max(0, Math.min(100, focusX));
+            this.focusY = Math.max(0, Math.min(100, focusY));
+            this.zoom = Math.max(CONTACTS_DIALPAD_ZOOM_MIN, Math.min(CONTACTS_DIALPAD_ZOOM_MAX, zoom));
         }
 
         boolean isVideo() { return mime.startsWith("video/"); }
@@ -153,7 +200,8 @@ public final class BackgroundContract {
         String cacheKey() {
             return slot + ':' + mime + ':' + size + ':' + modified + ':' + opacity + ':'
                     + blurEnabled + ':' + blurRadius + ':' + fontMode + ':' + deviceLogoMode + ':'
-                    + deviceLogoText + ':' + deviceLogoColor + ':' + settingsThemeMode;
+                    + deviceLogoText + ':' + deviceLogoColor + ':' + settingsThemeMode + ':'
+                    + focusX + ':' + focusY + ':' + zoom;
         }
     }
 }

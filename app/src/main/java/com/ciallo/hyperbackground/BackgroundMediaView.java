@@ -15,6 +15,7 @@ import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.view.Surface;
 import android.view.TextureView;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -30,9 +31,15 @@ final class BackgroundMediaView extends FrameLayout implements TextureView.Surfa
     private Drawable imageDrawable;
     private MediaPlayer mediaPlayer;
     private ParcelFileDescriptor dataDescriptor;
+    private View.OnLayoutChangeListener imageLayoutListener;
     private int videoWidth;
     private int videoHeight;
     private boolean hostResumed = true;
+    // 顶部圆角半径（px，>0 才裁切）。用自绘 clipPath 而非 setClipToOutline，后者对内部 MATRIX 绘制的
+    // ImageView 内容裁切不稳定，直接在 dispatchDraw 裁路径可确保对任意子内容一定生效。
+    private float topCornerRadius;
+    private final android.graphics.Path clipPath = new android.graphics.Path();
+    private final android.graphics.RectF clipRect = new android.graphics.RectF();
 
     BackgroundMediaView(Context context, BackgroundContract.Source source) throws IOException {
         super(context);
@@ -92,12 +99,45 @@ final class BackgroundMediaView extends FrameLayout implements TextureView.Surfa
         }
         releasePlayer();
         if (textureView != null) textureView.setSurfaceTextureListener(null);
+        if (imageView != null && imageLayoutListener != null) {
+            imageView.removeOnLayoutChangeListener(imageLayoutListener);
+        }
+        imageLayoutListener = null;
         removeAllViews();
+    }
+
+    // 设置圆角半径（px）：四角同半径圆角裁切。
+    void setTopCornerRadius(float radiusPx) {
+        this.topCornerRadius = Math.max(0f, radiusPx);
+        setWillNotDraw(false);
+        invalidate();
+    }
+
+    @Override
+    protected void dispatchDraw(android.graphics.Canvas canvas) {
+        if (topCornerRadius <= 0f) {
+            super.dispatchDraw(canvas);
+            return;
+        }
+        int w = getWidth();
+        int h = getHeight();
+        if (w <= 0 || h <= 0) {
+            super.dispatchDraw(canvas);
+            return;
+        }
+        // 四角同半径圆角。半径不超过宽/高一半，避免面板从底部往上弹出、动画中途高度较小时圆角画不全。
+        float r = Math.min(topCornerRadius, Math.min(w, h) / 2f);
+        clipPath.reset();
+        clipRect.set(0f, 0f, w, h);
+        clipPath.addRoundRect(clipRect, r, r, android.graphics.Path.Direction.CW);
+        int save = canvas.save();
+        canvas.clipPath(clipPath);
+        super.dispatchDraw(canvas);
+        canvas.restoreToCount(save);
     }
 
     private void createImageView() throws IOException {
         imageView = new ImageView(getContext());
-        imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
         imageView.setAdjustViewBounds(false);
         ImageDecoder.Source decoderSource = ImageDecoder.createSource(() ->
                 new AssetFileDescriptor(
@@ -109,11 +149,67 @@ final class BackgroundMediaView extends FrameLayout implements TextureView.Surfa
         addView(imageView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
+        // 方案 A：默认（zoom=100 且横纵向居中）直接用系统 CENTER_CROP，等比铺满并自动居中，对任意宽高比
+        // 的图都精确铺满不错位；仅当用户动了缩放 / 位置滑块时才切到 MATRIX 微调（以 CENTER_CROP 为基准）。
+        applyImageScale();
         if (imageDrawable instanceof AnimatedImageDrawable) {
             AnimatedImageDrawable animated = (AnimatedImageDrawable) imageDrawable;
             animated.setRepeatCount(AnimatedImageDrawable.REPEAT_INFINITE);
             animated.start();
         }
+    }
+
+    // 默认走系统 MATRIX 屏幕坐标系定位（图钉在整块屏幕上、横向铺满居中，拨号盘只是窗口）。此定位以屏幕
+    // 为参照系，与 CENTER_CROP（以拨号盘区域为参照）不同，故即便 zoom=100/focusY=50 也需自绘矩阵。
+    private void applyImageScale() {
+        if (imageView == null) return;
+        if (imageLayoutListener != null) imageView.removeOnLayoutChangeListener(imageLayoutListener);
+        // MATRIX 定位依赖 media 的屏幕坐标（getLocationOnScreen），需在布局后（进入视图树、位置确定）计算，
+        // 故注册 layout 监听并兜底 post 到下一帧，确保定位一定落地。
+        imageView.setScaleType(ImageView.ScaleType.MATRIX);
+        imageLayoutListener = (v, l, t, r, b, ol, ot, or, ob) -> updateImageCropMatrix();
+        imageView.addOnLayoutChangeListener(imageLayoutListener);
+        updateImageCropMatrix();
+        imageView.post(this::updateImageCropMatrix);
+    }
+
+    // 定位：横向以「屏幕宽度」等比铺满并相对整屏居中（恒居中，不受视口位置影响）；纵向以「拨号盘视口
+    // 自身」为取景范围——focusY=0 图顶对齐视口顶（看到图最上段）、100 图底对齐视口底（看到图最下段）、
+    // 50 居中，可拖过整张图。此前纵向用整屏高作范围、可移动量被视口外区域吃掉，导致 100% 也扫不到图底。
+    // zoom：以屏幕宽为基准放大/缩小。
+    private void updateImageCropMatrix() {
+        if (imageView == null || imageDrawable == null) return;
+        if (imageView.getScaleType() != ImageView.ScaleType.MATRIX) return;
+        int dw = imageDrawable.getIntrinsicWidth();
+        int dh = imageDrawable.getIntrinsicHeight();
+        if (dw <= 0 || dh <= 0) return;
+        int vh = imageView.getHeight();
+        if (vh <= 0) return;   // 视口高度未就绪，等布局监听 / post 回调再算
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        int screenW = dm.widthPixels;
+        if (screenW <= 0) return;
+
+        // 以屏幕宽度铺满为基准（图宽 = 屏幕宽），再乘缩放大小 zoom。100%=正好等于屏幕宽。
+        float zoom = Math.max(1, Math.min(200, source.zoom)) / 100f;
+        float scale = (float) screenW / dw * zoom;
+        float scaledW = dw * scale;   // 缩放后图宽（zoom=100 时 = screenW）
+        float scaledH = dh * scale;   // 缩放后图高（竖图通常 > 视口高）
+
+        // 横向：图相对整屏居中（恒居中铺满）。视口在屏幕上的 x 偏移需扣除，使图对齐屏幕中线而非视口中线。
+        int[] loc = new int[2];
+        imageView.getLocationOnScreen(loc);
+        int mediaX = loc[0];
+        float dx = (screenW - scaledW) / 2f - mediaX;
+
+        // 纵向：以拨号盘视口自身为取景范围，focusY 在 [0, vh - scaledH] 内插值（scaledH>vh 时为负、向上滚动），
+        // 0=图顶对齐视口顶、100=图底对齐视口底，可覆盖整张图。
+        float fy = Math.max(0, Math.min(100, source.focusY)) / 100f;
+        float dy = (vh - scaledH) * fy;
+
+        Matrix matrix = new Matrix();
+        matrix.setScale(scale, scale);
+        matrix.postTranslate(Math.round(dx), Math.round(dy));
+        imageView.setImageMatrix(matrix);
     }
 
     private void createVideoView() {
@@ -190,16 +286,24 @@ final class BackgroundMediaView extends FrameLayout implements TextureView.Surfa
         int viewHeight = textureView.getHeight();
         if (viewWidth <= 0 || viewHeight <= 0) return;
 
-        float scale = Math.max(
-                (float) viewWidth / (float) videoWidth,
-                (float) viewHeight / (float) videoHeight);
-        float scaledWidth = videoWidth * scale;
-        float scaledHeight = videoHeight * scale;
+        // 单一缩放模式（与图片一致）：TextureView 默认 FIT_XY 铺满，先以贴满基准(cover)×zoom 得到目标尺寸，
+        // 再用矩阵把默认铺满还原成该尺寸，最后按横纵向焦点定位。
+        // 缩放大小 1-200 → 倍数 0.01-2.0（100=贴满基准，>100 放大溢出、<100 缩小留边）。
+        float zoom = source.zoom / 100f;
+        float baseScale = Math.max(
+                (float) viewWidth / videoWidth, (float) viewHeight / videoHeight);   // cover 基准
+        float scaledWidth = videoWidth * baseScale * zoom;
+        float scaledHeight = videoHeight * baseScale * zoom;
+        // 相对「默认铺满」的缩放系数（默认铺满 = viewW×viewH）。
         float scaleX = scaledWidth / viewWidth;
         float scaleY = scaledHeight / viewHeight;
+        float fx = Math.max(0, Math.min(100, source.focusX)) / 100f;
+        float fy = Math.max(0, Math.min(100, source.focusY)) / 100f;
 
         Matrix matrix = new Matrix();
-        matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f);
+        // 绕左上角缩放，再按焦点平移定位：(view - scaled) * focus，放大/缩小都成立，默认 0.5 居中。
+        matrix.setScale(scaleX, scaleY, 0f, 0f);
+        matrix.postTranslate((viewWidth - scaledWidth) * fx, (viewHeight - scaledHeight) * fy);
         textureView.setTransform(matrix);
     }
 

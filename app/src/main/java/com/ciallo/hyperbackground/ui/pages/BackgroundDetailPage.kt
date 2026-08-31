@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +30,7 @@ import com.ciallo.hyperbackground.ui.MainActivity
 import com.ciallo.hyperbackground.ui.components.SectionTitle
 import com.ciallo.hyperbackground.ui.components.BackgroundPickerPreference
 import com.ciallo.hyperbackground.ui.components.SliderPreference
+import com.ciallo.hyperbackground.ui.components.SliderWithInputPreference
 import com.ciallo.hyperbackground.ui.components.UiCard
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -60,11 +62,20 @@ fun BackgroundDetailPage(
         item {
             UiCard(activity, Modifier.fillMaxWidth()) {
                 BackgroundPickerPreference(activity = activity, slot = slot)
+                // 通讯录：把「颜色模式」并入「背景」卡，作为「设置背景」下方的同卡条目（无独立分组标题）。
+                if (slot == BackgroundContract.CONTACTS) {
+                    ContactsThemePreference(activity)
+                }
             }
         }
         if (slot == BackgroundContract.HOME) {
             item { SectionTitle(stringResource(R.string.blur)) }
             item { TopBlurCard(activity) }
+        }
+        if (slot == BackgroundContract.CONTACTS) {
+            item { SectionTitle(stringResource(R.string.contacts_surface_title)) }
+            // 「拨号盘与列表」卡内含：适配开关、键盘不透明度、以及并入的「拨号盘背景」下拉。
+            item { ContactsSurfaceCard(activity, revision) }
         }
         if (slot == BackgroundContract.GLOBAL) {
             item { SectionTitle(stringResource(R.string.settings_appearance)) }
@@ -154,6 +165,161 @@ private fun TopBlurCard(activity: MainActivity) {
             }
         }
     }
+}
+
+@Composable
+private fun ContactsSurfaceCard(activity: MainActivity, revision: Int) {
+    val config = activity.config
+    var enabled by remember {
+        mutableStateOf(config.getBoolean(BackgroundContract.CONTACTS_SURFACE_ADAPT, true))
+    }
+    var opacity by remember {
+        mutableFloatStateOf(
+            config.getInt(BackgroundContract.CONTACTS_DIALPAD_OPACITY, 60)
+                .coerceIn(0, 100)
+                .toFloat(),
+        )
+    }
+    var dialpadMode by remember {
+        mutableIntStateOf(
+            config.getInt(
+                BackgroundContract.CONTACTS_DIALPAD_BG_MODE,
+                BackgroundContract.CONTACTS_DIALPAD_BG_DEFAULT,
+            ),
+        )
+    }
+    var focusY by remember {
+        mutableFloatStateOf(
+            config.getInt(BackgroundContract.CONTACTS_DIALPAD_FOCUS_Y, 50)
+                .coerceIn(0, 100)
+                .toFloat(),
+        )
+    }
+    var zoom by remember {
+        mutableFloatStateOf(
+            config.getInt(
+                BackgroundContract.CONTACTS_DIALPAD_ZOOM,
+                BackgroundContract.CONTACTS_DIALPAD_ZOOM_DEFAULT,
+            ).coerceIn(
+                BackgroundContract.CONTACTS_DIALPAD_ZOOM_MIN,
+                BackgroundContract.CONTACTS_DIALPAD_ZOOM_MAX,
+            ).toFloat(),
+        )
+    }
+    val dialpadModeOptions = listOf(
+        stringResource(R.string.contacts_dialpad_bg_default),
+        stringResource(R.string.contacts_dialpad_bg_custom),
+    )
+    UiCard(activity, Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(vertical = 8.dp)) {
+            SwitchPreference(
+                title = stringResource(R.string.contacts_surface_adapt),
+                summary = stringResource(R.string.contacts_surface_adapt_summary),
+                checked = enabled,
+                onCheckedChange = {
+                    enabled = it
+                    config.edit().putBoolean(BackgroundContract.CONTACTS_SURFACE_ADAPT, it).apply()
+                },
+            )
+            AnimatedVisibility(
+                visible = enabled,
+                enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(220)),
+                exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(180)),
+            ) {
+                Column(Modifier.padding(bottom = 8.dp)) {
+                    SliderPreference(
+                        label = stringResource(R.string.contacts_dialpad_opacity),
+                        value = opacity,
+                        range = 0f..100f,
+                        suffix = "%",
+                        onValueChange = { opacity = it },
+                        onValueChangeFinished = {
+                            config.edit()
+                                .putInt(BackgroundContract.CONTACTS_DIALPAD_OPACITY, it.toInt())
+                                .apply()
+                        },
+                    )
+                }
+            }
+            // 「拨号盘背景 默认/自定义」并入本卡：选「自定义」展开与其它通道一致的选图 + 透明度 + 清除。
+            OverlayDropdownPreference(
+                title = stringResource(R.string.contacts_dialpad_bg_mode),
+                items = dialpadModeOptions,
+                selectedIndex = dialpadMode.coerceIn(dialpadModeOptions.indices),
+                onSelectedIndexChange = {
+                    dialpadMode = it
+                    config.edit().putInt(BackgroundContract.CONTACTS_DIALPAD_BG_MODE, it).apply()
+                },
+            )
+            AnimatedVisibility(
+                visible = dialpadMode == BackgroundContract.CONTACTS_DIALPAD_BG_CUSTOM,
+                enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(220)),
+                exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(180)),
+            ) {
+                Column(Modifier.padding(bottom = 8.dp)) {
+                    key(revision) {
+                        BackgroundPickerPreference(activity = activity, slot = BackgroundContract.CONTACTS_DIALPAD)
+                    }
+                    // 缩放大小：等比缩放，100% 为贴满基准，可放大到 200% 或缩小到 1%。
+                    SliderPreference(
+                        label = stringResource(R.string.contacts_dialpad_zoom),
+                        value = zoom,
+                        range = BackgroundContract.CONTACTS_DIALPAD_ZOOM_MIN.toFloat()..
+                            BackgroundContract.CONTACTS_DIALPAD_ZOOM_MAX.toFloat(),
+                        suffix = "%",
+                        onValueChange = { zoom = it },
+                        onValueChangeFinished = {
+                            config.edit()
+                                .putInt(BackgroundContract.CONTACTS_DIALPAD_ZOOM, zoom.toInt())
+                                .apply()
+                        },
+                    )
+                    // 纵向位置（屏幕坐标系）：0 图顶部对齐、50 居中、100 底部对齐，控制透过拨号盘看到图的哪一段。
+                    // 横向恒居中铺满（以屏幕宽为基准），故不再提供横向位置。滑块 + 数值输入框可精确调节。
+                    SliderWithInputPreference(
+                        label = stringResource(R.string.contacts_dialpad_focus_y),
+                        value = focusY,
+                        range = 0f..100f,
+                        suffix = "%",
+                        onValueChange = { focusY = it },
+                        onValueChangeFinished = {
+                            config.edit()
+                                .putInt(BackgroundContract.CONTACTS_DIALPAD_FOCUS_Y, focusY.toInt())
+                                .apply()
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 通讯录与拨号进程专属深浅色下拉（并入「背景」卡，无独立卡壳）。三态：跟随系统 / 浅色 / 深色。
+ * 写 CONTACTS_THEME_MODE；FOLLOW 时 hook 侧会主动撤销 per-app 覆盖。
+ */
+@Composable
+private fun ContactsThemePreference(activity: MainActivity) {
+    val config = activity.config
+    var contactsTheme by remember {
+        mutableIntStateOf(
+            config.getInt(BackgroundContract.CONTACTS_THEME_MODE, BackgroundContract.SETTINGS_THEME_FOLLOW),
+        )
+    }
+    val themeOptions = listOf(
+        stringResource(R.string.follow_system),
+        stringResource(R.string.light),
+        stringResource(R.string.dark),
+    )
+    OverlayDropdownPreference(
+        title = stringResource(R.string.contacts_theme),
+        items = themeOptions,
+        selectedIndex = contactsTheme.coerceIn(themeOptions.indices),
+        onSelectedIndexChange = {
+            contactsTheme = it
+            config.edit().putInt(BackgroundContract.CONTACTS_THEME_MODE, it).apply()
+        },
+    )
 }
 
 @Composable

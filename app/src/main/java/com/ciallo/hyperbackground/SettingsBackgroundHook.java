@@ -16,6 +16,7 @@ public final class SettingsBackgroundHook {
     private static final Map<Activity, Runnable> PENDING_GLOBAL = Collections.synchronizedMap(new WeakHashMap<>());
     static void install(String packageName, ClassLoader classLoader) {
         boolean settings = BackgroundContract.PACKAGE_SETTINGS.equals(packageName);
+        boolean contacts = BackgroundContract.PACKAGE_CONTACTS.equals(packageName);
 
         hookGlobalActivities();
         hookInstrumentationLifecycle();
@@ -23,7 +24,7 @@ public final class SettingsBackgroundHook {
 
         // 主题（深浅色）与文字色强制对所有支持的作用域进程生效，不再局限于设置进程，
         // 这样应用详情页等由其它进程提供的页面也能被强制控制。
-        SettingsThemeOverride.install();
+        SettingsThemeOverride.install(packageName);
         TextColorOverride.install();
 
         if (settings) {
@@ -32,6 +33,11 @@ public final class SettingsBackgroundHook {
             hookHomeActivity(classLoader);
             hookHomeFragment(classLoader);
             hookDeviceFragment(classLoader);
+        }
+
+        if (contacts) {
+            hookContactsActivity(classLoader);
+            hookDialpadLayout(classLoader);
         }
     }
 
@@ -178,6 +184,66 @@ public final class SettingsBackgroundHook {
         } catch (Throwable ignored) {
             BackgroundApplier.applyGlobal(activity);
         }
+    }
+
+    private static void hookContactsActivity(ClassLoader classLoader) {
+        final String className = "com.android.contacts.activities.PeopleActivity";
+        try {
+            XposedHelpers.findAndHookMethod(
+                    className, classLoader, "onCreate", Bundle.class,
+                    new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.thisObject instanceof Activity) BackgroundApplier.applyContacts((Activity) param.thisObject);
+                        }
+                    });
+            XposedHelpers.findAndHookMethod(
+                    className, classLoader, "onResume",
+                    new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.thisObject instanceof Activity) BackgroundApplier.applyContacts((Activity) param.thisObject);
+                        }
+                    });
+            XposedHelpers.findAndHookMethod(
+                    className, classLoader, "onContentChanged",
+                    new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.thisObject instanceof Activity) BackgroundApplier.applyContacts((Activity) param.thisObject);
+                        }
+                    });
+            XposedHelpers.findAndHookMethod(
+                    className, classLoader, "onStop",
+                    new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.thisObject instanceof Activity) BackgroundApplier.stopContacts((Activity) param.thisObject);
+                        }
+                    });
+            XposedHelpers.findAndHookMethod(
+                    className, classLoader, "onDestroy",
+                    new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.thisObject instanceof Activity) BackgroundApplier.destroyContacts((Activity) param.thisObject);
+                        }
+                    });
+            XposedBridge.log("[HyperBackground] Installed contacts PeopleActivity background hooks");
+        } catch (Throwable error) { logHookError("PeopleActivity", error); }
+    }
+
+    // 拨号盘键盘容器 DialpadLayout 在 onFinishInflate 时（其子 view 已 findViewById 完毕、绘制第一帧之前）
+    // 同步处理拨号盘背景（默认设 alpha / 自定义叠加独立背景图），根除“先露原生底色再变透”的先灰后透闪烁。
+    private static void hookDialpadLayout(ClassLoader classLoader) {
+        final String className = "com.android.contacts.dialer.view.DialpadLayout";
+        try {
+            XposedHelpers.findAndHookMethod(
+                    className, classLoader, "onFinishInflate",
+                    new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.thisObject instanceof View) {
+                                BackgroundApplier.applyDialpadOnInflate((View) param.thisObject);
+                            }
+                        }
+                    });
+            XposedBridge.log("[HyperBackground] Installed DialpadLayout background hook");
+        } catch (Throwable error) { logHookError("DialpadLayout", error); }
     }
 
     private static void hookHomeActivity(ClassLoader classLoader) {
