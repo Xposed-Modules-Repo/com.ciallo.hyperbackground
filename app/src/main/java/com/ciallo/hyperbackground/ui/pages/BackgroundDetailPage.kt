@@ -135,6 +135,13 @@ private fun TopBlurCard(activity: MainActivity) {
                 .toFloat(),
         )
     }
+    var opacity by remember {
+        mutableFloatStateOf(
+            config.getInt(BackgroundContract.UI_TOP_BLUR_OPACITY, 100)
+                .coerceIn(0, 100)
+                .toFloat(),
+        )
+    }
     UiCard(activity, Modifier.fillMaxWidth()) {
         Column(Modifier.padding(vertical = 8.dp)) {
             SwitchPreference(
@@ -164,6 +171,18 @@ private fun TopBlurCard(activity: MainActivity) {
                                 .apply()
                         },
                     )
+                    SliderPreference(
+                        label = stringResource(R.string.top_blur_opacity),
+                        value = opacity,
+                        range = 0f..100f,
+                        suffix = "%",
+                        onValueChange = { opacity = it },
+                        onValueChangeFinished = {
+                            config.edit()
+                                .putInt(BackgroundContract.UI_TOP_BLUR_OPACITY, it.toInt())
+                                .apply()
+                        },
+                    )
                 }
             }
         }
@@ -171,8 +190,7 @@ private fun TopBlurCard(activity: MainActivity) {
 }
 
 /**
- * 清除设置主页顶栏遮罩（黑/白底色框）开关。
- * 与「顶部模糊（HyperOS 3）」互斥：开启后 Xposed 侧清除优先，顶栏模糊 hook 主动让位。
+ * 清除设置各级页面顶栏遮罩。开启后覆盖顶部模糊，将首页与二级页顶栏统一变透明。
  */
 @Composable
 private fun TopClearCard(activity: MainActivity) {
@@ -188,7 +206,9 @@ private fun TopClearCard(activity: MainActivity) {
                 checked = enabled,
                 onCheckedChange = {
                     enabled = it
-                    config.edit().putBoolean(BackgroundContract.UI_TOP_CLEAR_ENABLED, it).apply()
+                    config.edit()
+                        .putBoolean(BackgroundContract.UI_TOP_CLEAR_ENABLED, it)
+                        .apply()
                 },
             )
         }
@@ -196,9 +216,7 @@ private fun TopClearCard(activity: MainActivity) {
 }
 
 /**
- * 设置主页背景缩放 / 定位卡：缩放大小 + 横向位置 + 纵向位置。
- * 走整页 CENTER_CROP 基准——缩放 100% 且位置居中时精确等比铺满（与 1.4.1 观感一致），
- * 参数仅作用于 home 通道，不影响拨号盘 / 其它整页背景。
+ * 设置主页背景缩放与定位。100/50/50 对应 CENTER_CROP 默认观感，参数只写入 home 通道。
  */
 @Composable
 private fun HomeScaleCard(activity: MainActivity) {
@@ -216,17 +234,20 @@ private fun HomeScaleCard(activity: MainActivity) {
     }
     var focusX by remember {
         mutableFloatStateOf(
-            config.getInt(BackgroundContract.HOME_FOCUS_X, 50).coerceIn(0, 100).toFloat(),
+            config.getInt(BackgroundContract.HOME_FOCUS_X, 50)
+                .coerceIn(0, 100)
+                .toFloat(),
         )
     }
     var focusY by remember {
         mutableFloatStateOf(
-            config.getInt(BackgroundContract.HOME_FOCUS_Y, 50).coerceIn(0, 100).toFloat(),
+            config.getInt(BackgroundContract.HOME_FOCUS_Y, 50)
+                .coerceIn(0, 100)
+                .toFloat(),
         )
     }
     UiCard(activity, Modifier.fillMaxWidth()) {
         Column(Modifier.padding(vertical = 8.dp)) {
-            // 缩放大小：等比缩放，100% 为等比铺满基准，可放大到 200% 或缩小到 1%。
             SliderPreference(
                 label = stringResource(R.string.home_zoom),
                 value = zoom,
@@ -238,7 +259,6 @@ private fun HomeScaleCard(activity: MainActivity) {
                     config.edit().putInt(BackgroundContract.HOME_ZOOM, zoom.toInt()).apply()
                 },
             )
-            // 横向位置：0 左对齐、50 居中、100 右对齐。
             SliderWithInputPreference(
                 label = stringResource(R.string.home_focus_x),
                 value = focusX,
@@ -249,7 +269,6 @@ private fun HomeScaleCard(activity: MainActivity) {
                     config.edit().putInt(BackgroundContract.HOME_FOCUS_X, focusX.toInt()).apply()
                 },
             )
-            // 纵向位置：0 顶部对齐、50 居中、100 底部对齐。
             SliderWithInputPreference(
                 label = stringResource(R.string.home_focus_y),
                 value = focusY,

@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.ImageView
 import android.widget.Toast
+import java.io.File
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -55,11 +56,13 @@ import com.ciallo.hyperbackground.appearance.AppearanceUiController
 import com.ciallo.hyperbackground.appearance.DeviceProfileSettings
 import com.ciallo.hyperbackground.appearance.SettingsAppearanceSettings
 import com.ciallo.hyperbackground.ui.pages.BackgroundDetailPage
+import com.ciallo.hyperbackground.ui.pages.AboutPage
 import com.ciallo.hyperbackground.ui.pages.ChangelogPage
 import com.ciallo.hyperbackground.ui.pages.DeviceCardPage
 import com.ciallo.hyperbackground.ui.pages.DeviceInfoPage
 import com.ciallo.hyperbackground.ui.pages.HomePage
 import com.ciallo.hyperbackground.ui.pages.SettingsPage
+import com.ciallo.hyperbackground.ui.pages.RandomBackgroundPage
 import com.ciallo.hyperbackground.ui.pages.RestartScopesDialog
 import com.ciallo.hyperbackground.ui.pages.UpdateAvailableDialog
 import kotlinx.coroutines.launch
@@ -80,6 +83,7 @@ import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.Home
+import top.yukonga.miuix.kmp.icon.extended.Info
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.theme.ColorSchemeMode
@@ -180,6 +184,42 @@ class MainActivity : ComponentActivity() {
 
     fun clearUiBackground() {
         if (config.clearUiBackground()) revision++
+    }
+
+    /**
+     * 把当前槽位实际生效的背景图导出到相册（Pictures/HyperBackground/）。
+     * 随机背景开启且生效时导出 random 图，否则导出手动图。成功后通知 MediaStore 扫描。
+     */
+    fun exportBackground(slot: String?) {
+        val file = if (slot == null) config.currentUiBackgroundFile() else config.currentBackgroundFile(slot)
+        if (!file.isFile) {
+            toast(R.string.export_no_file)
+            return
+        }
+        val mime = if (slot == null) config.currentUiBackgroundMime() else config.currentBackgroundMime(slot)
+        val ext = when {
+            mime.contains("png", ignoreCase = true) -> "png"
+            mime.contains("webp", ignoreCase = true) -> "webp"
+            mime.contains("gif", ignoreCase = true) -> "gif"
+            mime.contains("jpeg", ignoreCase = true) || mime.contains("jpg", ignoreCase = true) -> "jpg"
+            else -> "bin"
+        }
+        runCatching {
+            val dir = android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_PICTURES,
+            ).resolve("HyperBackground")
+            if (!dir.exists()) dir.mkdirs()
+            val slotName = slot ?: "module_ui"
+            val target = File(dir, "hyperbackground_${slotName}_${System.currentTimeMillis()}.$ext")
+            file.copyTo(target, overwrite = true)
+            // 通知系统相册扫描新文件。
+            android.media.MediaScannerConnection.scanFile(
+                this, arrayOf(target.absolutePath), arrayOf(mime), null,
+            )
+            toast(getString(R.string.export_done, target.name))
+        }.onFailure {
+            toast(getString(R.string.save_failed, it.message ?: "Unknown error"))
+        }
     }
 
     /**
@@ -332,34 +372,37 @@ class MainActivity : ComponentActivity() {
     ) {
         var detailSlot by rememberSaveable { mutableStateOf<String?>(null) }
         BackHandler(enabled = detailSlot != null) { detailSlot = null }
-        AnimatedContent(
-            targetState = detailSlot,
-            modifier = Modifier.fillMaxSize(),
-            transitionSpec = {
-                if (targetState != null) {
-                    (slideIntoContainer(
-                        AnimatedContentTransitionScope.SlideDirection.Left,
-                        animationSpec = tween(360, easing = EaseInOut),
-                    ) + fadeIn(tween(240))) togetherWith
-                        (slideOutOfContainer(
+        // 共享背景层放在 AnimatedContent 之外：页面切换时只有内容滑动，背景保持不动。
+        Box(Modifier.fillMaxSize()) {
+            ModuleBackground(revision)
+            AnimatedContent(
+                targetState = detailSlot,
+                modifier = Modifier.fillMaxSize(),
+                transitionSpec = {
+                    if (targetState != null) {
+                        (slideIntoContainer(
                             AnimatedContentTransitionScope.SlideDirection.Left,
                             animationSpec = tween(360, easing = EaseInOut),
-                        ) + fadeOut(tween(180)))
-                } else {
-                    (slideIntoContainer(
-                        AnimatedContentTransitionScope.SlideDirection.Right,
-                        animationSpec = tween(360, easing = EaseInOut),
-                    ) + fadeIn(tween(240))) togetherWith
-                        (slideOutOfContainer(
+                        ) + fadeIn(tween(240))) togetherWith
+                            (slideOutOfContainer(
+                                AnimatedContentTransitionScope.SlideDirection.Left,
+                                animationSpec = tween(360, easing = EaseInOut),
+                            ) + fadeOut(tween(180)))
+                    } else {
+                        (slideIntoContainer(
                             AnimatedContentTransitionScope.SlideDirection.Right,
                             animationSpec = tween(360, easing = EaseInOut),
-                        ) + fadeOut(tween(180)))
-                }.using(SizeTransform(clip = true))
-            },
-            label = "screen-navigation",
-        ) { slot ->
-            when (slot) {
-                null -> MainTabs(
+                        ) + fadeIn(tween(240))) togetherWith
+                            (slideOutOfContainer(
+                                AnimatedContentTransitionScope.SlideDirection.Right,
+                                animationSpec = tween(360, easing = EaseInOut),
+                            ) + fadeOut(tween(180)))
+                    }.using(SizeTransform(clip = true))
+                },
+                label = "screen-navigation",
+            ) { slot ->
+                when (slot) {
+                    null -> MainTabs(
                     themeMode = themeMode,
                     themeColorEnabled = themeColorEnabled,
                     monet = monet,
@@ -371,21 +414,11 @@ class MainActivity : ComponentActivity() {
                     onOpenBackground = { detailSlot = it },
                     onOpenChangelog = { detailSlot = ROUTE_CHANGELOG },
                 )
-                ROUTE_CHANGELOG -> Box(Modifier.fillMaxSize()) {
-                    ModuleBackground(revision)
-                    ChangelogScreen(onBack = { detailSlot = null })
-                }
-                ROUTE_DEVICE_CARD -> Box(Modifier.fillMaxSize()) {
-                    ModuleBackground(revision)
-                    DeviceCardScreen(onBack = { detailSlot = null })
-                }
-                ROUTE_DEVICE_INFO -> Box(Modifier.fillMaxSize()) {
-                    ModuleBackground(revision)
-                    DeviceInfoScreen(onBack = { detailSlot = null })
-                }
-                else -> Box(Modifier.fillMaxSize()) {
-                    ModuleBackground(revision)
-                    BackgroundDetailScreen(slot = slot, onBack = { detailSlot = null })
+                    ROUTE_CHANGELOG -> ChangelogScreen(onBack = { detailSlot = null })
+                    ROUTE_DEVICE_CARD -> DeviceCardScreen(onBack = { detailSlot = null })
+                    ROUTE_DEVICE_INFO -> DeviceInfoScreen(onBack = { detailSlot = null })
+                    ROUTE_RANDOM_BG -> RandomBackgroundScreen(onBack = { detailSlot = null })
+                    else -> BackgroundDetailScreen(slot = slot, onBack = { detailSlot = null })
                 }
             }
         }
@@ -404,7 +437,7 @@ class MainActivity : ComponentActivity() {
         onOpenBackground: (String) -> Unit,
         onOpenChangelog: () -> Unit,
     ) {
-        val pagerState = rememberPagerState(pageCount = { 2 })
+        val pagerState = rememberPagerState(pageCount = { 3 })
         val scope = rememberCoroutineScope()
         val backgroundColor = MiuixTheme.colorScheme.surface
         val backdrop = if (bottomBarBlurEnabled) {
@@ -449,6 +482,12 @@ class MainActivity : ComponentActivity() {
                             icon = MiuixIcons.Settings,
                             label = getString(R.string.nav_settings),
                         )
+                        FloatingNavigationBarItem(
+                            selected = pagerState.currentPage == 2,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(2) } },
+                            icon = MiuixIcons.Info,
+                            label = getString(R.string.nav_about),
+                        )
                     }
                 } else {
                     NavigationBar(
@@ -468,6 +507,12 @@ class MainActivity : ComponentActivity() {
                             icon = MiuixIcons.Settings,
                             label = getString(R.string.nav_settings),
                         )
+                        NavigationBarItem(
+                            selected = pagerState.currentPage == 2,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(2) } },
+                            icon = MiuixIcons.Info,
+                            label = getString(R.string.nav_about),
+                        )
                     }
                 }
             },
@@ -476,7 +521,6 @@ class MainActivity : ComponentActivity() {
                 Modifier.fillMaxSize()
                     .then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier),
             ) {
-                ModuleBackground(revision)
                 HorizontalPager(
                     state = pagerState,
                     modifier = Modifier.fillMaxSize(),
@@ -499,7 +543,7 @@ class MainActivity : ComponentActivity() {
                                 onOpenBackground = onOpenBackground,
                             )
                         }
-                        else -> MainPageScaffold(
+                        1 -> MainPageScaffold(
                             title = getString(R.string.nav_settings),
                             bottomPadding = bottomPadding,
                             actions = {
@@ -520,6 +564,17 @@ class MainActivity : ComponentActivity() {
                                 onThemeColorEnabled = onThemeColorEnabled,
                                 onMonet = onMonet,
                                 onAccent = onAccent,
+                                onOpenChangelog = { scope.launch { pagerState.animateScrollToPage(2) } },
+                            )
+                        }
+                        else -> MainPageScaffold(
+                            title = getString(R.string.nav_about),
+                            bottomPadding = bottomPadding,
+                        ) { padding, scrollModifier ->
+                            AboutPage(
+                                activity = this@MainActivity,
+                                modifier = scrollModifier,
+                                padding = padding,
                                 onOpenChangelog = onOpenChangelog,
                             )
                         }
@@ -542,7 +597,7 @@ class MainActivity : ComponentActivity() {
         content: @Composable (PaddingValues, Modifier) -> Unit,
     ) {
         val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
-        val hasUiBackground = remember(revision) { config.uiBackgroundFile.isFile }
+        val hasUiBackground = remember(revision) { currentUiBackgroundFile().isFile }
         val topBarColor = if (hasUiBackground) {
             Color.Transparent
         } else {
@@ -573,7 +628,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun BackgroundDetailScreen(slot: String, onBack: () -> Unit) {
         val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
-        val hasUiBackground = remember(revision) { config.uiBackgroundFile.isFile }
+        val hasUiBackground = remember(revision) { currentUiBackgroundFile().isFile }
         val topBarColor = if (hasUiBackground) {
             Color.Transparent
         } else {
@@ -614,7 +669,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ChangelogScreen(onBack: () -> Unit) {
         val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
-        val hasUiBackground = remember(revision) { config.uiBackgroundFile.isFile }
+        val hasUiBackground = remember(revision) { currentUiBackgroundFile().isFile }
         val topBarColor = if (hasUiBackground) {
             Color.Transparent
         } else {
@@ -648,7 +703,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun DeviceCardScreen(onBack: () -> Unit) {
         val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
-        val hasUiBackground = remember(revision) { config.uiBackgroundFile.isFile }
+        val hasUiBackground = remember(revision) { currentUiBackgroundFile().isFile }
         val topBarColor = if (hasUiBackground) {
             Color.Transparent
         } else {
@@ -682,7 +737,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun DeviceInfoScreen(onBack: () -> Unit) {
         val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
-        val hasUiBackground = remember(revision) { config.uiBackgroundFile.isFile }
+        val hasUiBackground = remember(revision) { currentUiBackgroundFile().isFile }
         val topBarColor = if (hasUiBackground) {
             Color.Transparent
         } else {
@@ -714,8 +769,62 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
+    private fun RandomBackgroundScreen(onBack: () -> Unit) {
+        val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
+        val hasUiBackground = remember(revision) {
+            // 顶栏配色按当前实际展示的背景（随机或手动）判断。
+            currentUiBackgroundFile().isFile
+        }
+        val topBarColor = if (hasUiBackground) {
+            Color.Transparent
+        } else {
+            MiuixTheme.colorScheme.surface.copy(alpha = cardOpacity)
+        }
+        val title = getString(R.string.random_background)
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    color = topBarColor,
+                    title = title,
+                    largeTitle = title,
+                    scrollBehavior = scrollBehavior,
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(MiuixIcons.Back, contentDescription = getString(R.string.back))
+                        }
+                    },
+                )
+            },
+        ) { padding ->
+            RandomBackgroundPage(
+                activity = this@MainActivity,
+                modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+                padding = padding,
+            )
+        }
+    }
+
+    /**
+     * 当前应展示的模块 UI 背景文件：随机开关开启、ui 槽位被勾选且 random 文件存在时用 random 图，
+     * 否则用用户手动设置的 ui_background.bin。两份文件独立、互不覆盖。
+     */
+    private fun currentUiBackgroundFile(): java.io.File {
+        val randomOn = config.getBoolean(BackgroundContract.UI_RANDOM_BG_ENABLED, false)
+        val randomSlots = config.getStringSet(BackgroundContract.UI_RANDOM_BG_SLOTS, mutableSetOf()) ?: emptySet()
+        return if (randomOn &&
+            randomSlots.contains(BackgroundContract.RANDOM_SLOT_UI) &&
+            config.uiRandomBackgroundFile.isFile
+        ) {
+            config.uiRandomBackgroundFile
+        } else {
+            config.uiBackgroundFile
+        }
+    }
+
+    @Composable
     private fun ModuleBackground(revision: Int) {
-        val file = remember(revision) { config.uiBackgroundFile }
+        val file = remember(revision) { currentUiBackgroundFile() }
         if (!file.isFile) return
         val opacity = config.getInt(BackgroundContract.UI_BG_OPACITY, 100) / 100f
         val blur = config.getBoolean(BackgroundContract.UI_BG_BLUR_ENABLED, false)
@@ -747,5 +856,6 @@ class MainActivity : ComponentActivity() {
         const val ROUTE_CHANGELOG = "__changelog__"
         const val ROUTE_DEVICE_CARD = "__appearance_device_card__"
         const val ROUTE_DEVICE_INFO = "__appearance_device_info__"
+        const val ROUTE_RANDOM_BG = "__random_bg__"
     }
 }

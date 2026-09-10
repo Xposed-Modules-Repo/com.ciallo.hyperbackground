@@ -63,11 +63,12 @@ fun BackgroundPickerPreference(
     summary: String? = null,
 ) {
     val config = activity.config
-    val currentFile = if (slot == null) config.uiBackgroundFile else config.backgroundFile(slot)
+    // 预览与导出都以「当前实际生效的背景」为准：随机开启且生效时用 random 图，否则手动图。
+    val currentFile = if (slot == null) config.currentUiBackgroundFile() else config.currentBackgroundFile(slot)
     val currentMime = if (slot == null) {
-        config.getString(BackgroundContract.UI_BG_MIME, "image/*") ?: "image/*"
+        config.currentUiBackgroundMime()
     } else {
-        config.backgroundMime(slot)
+        config.currentBackgroundMime(slot)
     }
     var showDialog by remember { mutableStateOf(false) }
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
@@ -75,6 +76,9 @@ fun BackgroundPickerPreference(
     val opacityKey = if (slot == null) BackgroundContract.UI_BG_OPACITY else BackgroundContract.OPACITY_PREFIX + slot
     val blurKey = if (slot == null) BackgroundContract.UI_BG_BLUR_ENABLED else BackgroundContract.BLUR_ENABLED_PREFIX + slot
     val radiusKey = if (slot == null) BackgroundContract.UI_BG_BLUR_RADIUS else BackgroundContract.BLUR_RADIUS_PREFIX + slot
+    // 亮度仅对 BackgroundContract 通道（slot != null）生效——外观全局背景（slot == null）走另一套渲染，
+    // 不读 brightness_<slot>，故不展示亮度滑块。
+    val brightnessKey = if (slot == null) null else BackgroundContract.BRIGHTNESS_PREFIX + slot
     var opacity by remember(showDialog, activity.revision) {
         mutableFloatStateOf(config.getInt(opacityKey, 100).coerceIn(0, 100).toFloat())
     }
@@ -83,6 +87,12 @@ fun BackgroundPickerPreference(
     }
     var radius by remember(showDialog, activity.revision) {
         mutableFloatStateOf(config.getInt(radiusKey, 20).coerceIn(0, 80).toFloat())
+    }
+    var brightness by remember(showDialog, activity.revision) {
+        mutableFloatStateOf(
+            config.getInt(brightnessKey ?: opacityKey, BackgroundContract.BRIGHTNESS_DEFAULT)
+                .coerceIn(BackgroundContract.BRIGHTNESS_MIN, BackgroundContract.BRIGHTNESS_MAX).toFloat()
+        )
     }
 
     val entryTitle = title ?: stringResource(R.string.set_background)
@@ -95,6 +105,20 @@ fun BackgroundPickerPreference(
             Icon(imageVector = MiuixIcons.Basic.ArrowRight, contentDescription = null)
         },
         onClick = { showDialog = true },
+    )
+    // 导出当前生效的背景图到相册（随机图优先）。无背景时点击提示无文件可导出。
+    BasicComponent(
+        title = stringResource(R.string.export_background),
+        summary = if (currentFile.isFile) {
+            stringResource(R.string.export_background_summary, humanSize(currentFile.length()))
+        } else {
+            stringResource(R.string.export_no_file)
+        },
+        enabled = currentFile.isFile,
+        endActions = {
+            Icon(imageVector = MiuixIcons.Basic.ArrowRight, contentDescription = null)
+        },
+        onClick = { activity.exportBackground(slot) },
     )
 
     WindowDialog(
@@ -166,6 +190,16 @@ fun BackgroundPickerPreference(
                     onValueChangeFinished = {},
                 )
             }
+            if (brightnessKey != null) {
+                SliderPreference(
+                    label = stringResource(R.string.background_brightness),
+                    value = brightness,
+                    range = BackgroundContract.BRIGHTNESS_MIN.toFloat()..BackgroundContract.BRIGHTNESS_MAX.toFloat(),
+                    suffix = "%",
+                    onValueChange = { brightness = it },
+                    onValueChangeFinished = {},
+                )
+            }
             androidx.compose.foundation.layout.Spacer(Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 TextButton(
@@ -178,6 +212,9 @@ fun BackgroundPickerPreference(
                             .putBoolean(blurKey, false)
                             .putInt(radiusKey, 20)
                             .apply()
+                        if (brightnessKey != null) {
+                            config.edit().putInt(brightnessKey, BackgroundContract.BRIGHTNESS_DEFAULT).apply()
+                        }
                         activity.refreshUi()
                         dismiss?.invoke()
                     },
@@ -198,6 +235,9 @@ fun BackgroundPickerPreference(
                             .putBoolean(blurKey, blur)
                             .putInt(radiusKey, radius.toInt())
                             .apply()
+                        if (brightnessKey != null) {
+                            config.edit().putInt(brightnessKey, brightness.toInt()).apply()
+                        }
                         activity.refreshUi()
                         dismiss?.invoke()
                     },
