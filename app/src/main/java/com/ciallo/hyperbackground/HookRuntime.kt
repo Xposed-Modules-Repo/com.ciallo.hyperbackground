@@ -15,15 +15,28 @@ object HookRuntime {
     @Volatile
     private var prefsRef: SharedPreferences? = null
 
-    internal fun initialize(value: XposedModule, prefs: SharedPreferences) {
+    /**
+     * 当前注入进程的包名，由 [HookEntry] 在 `onPackageLoaded` 时上报。
+     * 动态材质 hook 用它做「软件作用域」的按包名过滤；一个进程内是常量。
+     */
+    @Volatile
+    var targetPackage: String? = null
+        private set
+
+    internal fun initialize(value: XposedModule, prefs: SharedPreferences, packageName: String?) {
         module = value
         prefsRef = prefs
+        targetPackage = packageName
     }
 
     fun preferences(): SharedPreferences {
         val value = prefsRef ?: throw IllegalStateException("Hook preferences are not initialized")
         return value
     }
+
+    fun module(): XposedModule = module ?: throw IllegalStateException("Hook module is not initialized")
+
+    fun remotePreferences(name: String): SharedPreferences? = module?.getRemotePreferences(name)
 
     @Throws(FileNotFoundException::class)
     fun openRemoteFile(name: String): ParcelFileDescriptor {
@@ -44,7 +57,7 @@ object HookRuntime {
         value.hook(executable).intercept { chain ->
             val param = LegacyHookParam(chain)
             callback.before(param)
-            val result = if (param.hasResult) param.result else chain.proceed(param.args)
+            val result = if (param.hasResult) param.result else param.proceed()
             param.setResultFromOriginal(result)
             callback.after(param)
             param.result
@@ -59,9 +72,16 @@ object HookRuntime {
         open fun after(param: LegacyHookParam) {}
     }
 
-    class LegacyHookParam internal constructor(chain: XposedInterface.Chain) {
+    class LegacyHookParam internal constructor(private val chain: XposedInterface.Chain) {
         val thisObject: Any? = chain.thisObject
-        val args: Array<Any?> = chain.args.toTypedArray()
+        private var copiedArgs: Array<Any?>? = null
+        val args: Array<Any?>
+            get() = copiedArgs ?: chain.args.toTypedArray().also { copiedArgs = it }
+
+        internal fun proceed(): Any? {
+            val arguments = copiedArgs
+            return if (arguments == null) chain.proceed() else chain.proceed(arguments)
+        }
 
         var result: Any? = null
             private set

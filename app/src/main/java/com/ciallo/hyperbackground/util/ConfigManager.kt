@@ -1,11 +1,14 @@
-package com.ciallo.hyperbackground
+package com.ciallo.hyperbackground.util
 
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
+import com.ciallo.hyperbackground.BackgroundContract
+import com.ciallo.hyperbackground.HyperBackgroundApp
 import io.github.libxposed.service.XposedService
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.collections.minus
 
 /** Central local storage that mirrors hook-facing state through libxposed. */
 class ConfigManager private constructor(private val context: Context) : SharedPreferences {
@@ -214,7 +217,7 @@ class ConfigManager private constructor(private val context: Context) : SharedPr
     fun syncToRemote(service: XposedService? = HyperBackgroundApp.xposedService) {
         service ?: return
         val metadata = preferences.edit()
-        listOf(BackgroundContract.HOME, BackgroundContract.DEVICE, BackgroundContract.GLOBAL, BackgroundContract.CONTACTS, BackgroundContract.CONTACTS_DIALPAD).forEach { slot ->
+        listOf(BackgroundContract.HOME, BackgroundContract.DEVICE, BackgroundContract.GLOBAL, BackgroundContract.CONTACTS, BackgroundContract.CONTACTS_DIALPAD, BackgroundContract.MMS, BackgroundContract.MMS_CHAT).forEach { slot ->
             val file = backgroundFile(slot)
             if (file.isFile) {
                 metadata.putLong(BackgroundContract.SIZE_PREFIX + slot, file.length())
@@ -235,10 +238,12 @@ class ConfigManager private constructor(private val context: Context) : SharedPr
         }
         metadata.commit()
         copyPreferences(preferences, service.getRemotePreferences(BackgroundContract.PREFS))
-        listOf(BackgroundContract.HOME, BackgroundContract.DEVICE, BackgroundContract.GLOBAL, BackgroundContract.CONTACTS, BackgroundContract.CONTACTS_DIALPAD).forEach { slot ->
+        listOf(BackgroundContract.HOME, BackgroundContract.DEVICE, BackgroundContract.GLOBAL, BackgroundContract.CONTACTS, BackgroundContract.CONTACTS_DIALPAD, BackgroundContract.MMS, BackgroundContract.MMS_CHAT).forEach { slot ->
             syncMedia(BackgroundContract.remoteMediaName(slot), backgroundFile(slot).takeIf(File::isFile), service)
             // random 背景独立同步到 background_<slot>.random.bin。
-            syncMedia(BackgroundContract.remoteMediaName(slot, random = true), randomBackgroundFile(slot).takeIf(File::isFile), service)
+            syncMedia(
+                BackgroundContract.remoteMediaName(slot, random = true), randomBackgroundFile(slot).takeIf(
+                    File::isFile), service)
         }
     }
 

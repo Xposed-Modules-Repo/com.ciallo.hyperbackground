@@ -35,7 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ciallo.hyperbackground.BackgroundContract
-import com.ciallo.hyperbackground.ConfigManager
+import com.ciallo.hyperbackground.util.ConfigManager
 import com.ciallo.hyperbackground.HyperBackgroundApp
 import com.ciallo.hyperbackground.R
 import com.ciallo.hyperbackground.ui.MainActivity
@@ -52,6 +52,7 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
 import top.yukonga.miuix.kmp.icon.extended.Background
+import top.yukonga.miuix.kmp.icon.extended.Messages
 import top.yukonga.miuix.kmp.icon.extended.Phone
 import top.yukonga.miuix.kmp.icon.extended.Refresh
 import top.yukonga.miuix.kmp.icon.extended.Settings
@@ -108,6 +109,11 @@ fun HomePage(
                     title = stringResource(R.string.background_contacts),
                     summary = stringResource(R.string.background_contacts_summary),
                 ) { onOpenBackground(BackgroundContract.CONTACTS) }
+                ScopeEntry(
+                    icon = MiuixIcons.Messages,
+                    title = stringResource(R.string.background_mms),
+                    summary = stringResource(R.string.background_mms_summary),
+                ) { onOpenBackground(BackgroundContract.MMS) }
                 // 随机背景入口并入通道列表末尾：进入专门页面配置 API/分类/作用范围，不影响手动设置的背景。
                 ScopeEntry(
                     icon = MiuixIcons.Refresh,

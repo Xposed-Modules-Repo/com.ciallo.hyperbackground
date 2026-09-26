@@ -20,6 +20,11 @@ const val APPEARANCE_SLOT_STYLE2_UPDATE_BACKGROUND = "style2_update_background"
 const val DEVICE_INTERFACE_STYLE_SYSTEM = 0
 const val DEVICE_INTERFACE_STYLE_ONE = 1
 const val DEVICE_INTERFACE_STYLE_TWO = 2
+const val DEVICE_INTERFACE_STYLE_THREE = 3
+
+const val COS_CARD_DEFAULT_TITLE = "HyperOS4"
+const val COS_CARD_DEFAULT_SUBTITLE = "一千万内最好的系统"
+const val COS_CARD_DEFAULT_SIGNATURE = "Cangcu"
 
 const val LOGO_MODE_SYSTEM = 0
 const val LOGO_MODE_NO_ADVANCED_MATERIAL = 1
@@ -43,6 +48,120 @@ private const val KEY_LOGO_SCALE = "logo_scale"
 private const val KEY_LOGO_MIME = "logo_mime"
 private const val KEY_LOGO_VERSION = "logo_version"
 private const val KEY_LIGHT_CARD_OPACITY = "light_card_opacity"
+internal const val KEY_CUSTOM_CARD_ENABLED = "custom_card_enabled"
+internal const val KEY_LIGHT_CARD_COLOR = "light_card_color"
+internal const val KEY_DARK_CARD_COLOR = "dark_card_color"
+internal const val KEY_CARD_BACKGROUND_MODE = "card_background_mode"
+internal const val KEY_LIGHT_FROST_COLOR = "light_frost_color"
+internal const val KEY_DARK_FROST_COLOR = "dark_frost_color"
+internal const val KEY_LIGHT_CARD_BLUR = "light_card_blur"
+internal const val KEY_DARK_CARD_BLUR = "dark_card_blur"
+internal const val KEY_LIGHT_SOFT_GLASS = "light_soft_glass"
+internal const val KEY_DARK_SOFT_GLASS = "dark_soft_glass"
+internal const val KEY_CARD_DARK_FOLLOWS_LIGHT = "card_dark_follows_light"
+// 组件作用域：动态适配按组件类型（分组卡片 / 独立卡片 / 弹窗 / 搜索框）分别控制是否套用材质。
+internal const val KEY_COMPONENT_GROUP_CARD = "component_group_card"
+internal const val KEY_COMPONENT_STANDALONE_CARD = "component_standalone_card"
+internal const val KEY_COMPONENT_POPUP = "component_popup"
+internal const val KEY_COMPONENT_SEARCH = "component_search"
+internal const val KEY_COMPONENT_FLOATING_BAR = "component_floating_bar"
+internal const val KEY_COMPONENT_TOP_BAR_BUTTON = "component_top_bar_button"
+// 全局壁纸：把 GLOBAL 槽位的背景图套用到作用域内各应用的大页面（默认开启；未配置壁纸时由 UI 提示）。
+internal const val KEY_COMPONENT_GLOBAL_WALLPAPER = "component_global_wallpaper"
+internal const val KEY_COMPONENT_LAYOUT_CLEANUP = "component_layout_cleanup"
+// 软件作用域：被单独关闭材质的包名集合（默认空 = 全部启用，新装应用无需写默认值）。
+internal const val KEY_APP_SCOPE_DISABLED = "app_scope_disabled"
+// 软件作用域 × 组件类型：被单独关闭的「组件|包名」集合（默认空 = 该包跟随全局组件开关），
+// 见 [ComponentKeys]。「整包关闭」仍走上面的 KEY_APP_SCOPE_DISABLED，两者是父子关系。
+internal const val KEY_APP_COMPONENT_DISABLED = "app_component_disabled"
+const val CARD_BACKGROUND_COLOR = 0
+const val CARD_BACKGROUND_FROST = 1
+const val CARD_BACKGROUND_SOFT_GLASS = 2
+internal const val DEFAULT_LIGHT_CARD_COLOR = -1 // #FFFFFFFF
+internal const val DEFAULT_DARK_CARD_COLOR = -14671580 // #FF202124
+internal const val DEFAULT_LIGHT_FROST_COLOR = 0x66FFFFFF
+internal const val DEFAULT_DARK_FROST_COLOR = 0x661C1C1E
+internal const val DEFAULT_CARD_BLUR = 24
+
+/**
+ * 柔光玻璃材质参数（42 参 shader 的自定义通道，语义见 docs/soft-glass-api.md），
+ * 默认值对齐 HyperIsland 灵动岛材质。浅色/深色各存一份，深色可整体跟随浅色。
+ */
+data class SoftGlassParams(
+    val blurRadiusDp: Int = 35,
+    val softLight: Double = -1.0,
+    val saturation: Double = 0.0,
+    val brightness: Double = 0.0,
+    val darker: Double = 0.0,
+    val transparency: Double = -0.57,
+    val burn: Double = 0.0,
+    val refraction: Double = 0.0,
+    val edgeThickness: Double = 0.8,
+    val reflection: Double = 0.0,
+    val directionalLightIntensity: Double = 1.0,
+    val backgroundSaturation: Double = 0.0,
+    val backgroundBrightness: Double = 0.04,
+    val highlight: Boolean = true,
+)
+
+/** SharedPreferences 不支持嵌套对象，管道符编码为单键字符串，字段顺序固定 14 段。 */
+internal fun SoftGlassParams.encodeSoftGlass(): String = StringBuilder().apply {
+    append(blurRadiusDp)
+    append('|').append(softLight)
+    append('|').append(saturation)
+    append('|').append(brightness)
+    append('|').append(darker)
+    append('|').append(transparency)
+    append('|').append(burn)
+    append('|').append(refraction)
+    append('|').append(edgeThickness)
+    append('|').append(reflection)
+    append('|').append(directionalLightIntensity)
+    append('|').append(backgroundSaturation)
+    append('|').append(backgroundBrightness)
+    append('|').append(if (highlight) 1 else 0)
+}.toString()
+
+internal fun decodeSoftGlass(raw: String?): SoftGlassParams {
+    val defaults = SoftGlassParams()
+    val parts = raw?.split('|') ?: return defaults
+    if (parts.size != 14) return defaults
+    fun decimal(index: Int, fallback: Double): Double =
+        parts[index].toDoubleOrNull()?.coerceIn(-50.0, 50.0) ?: fallback
+    return SoftGlassParams(
+        blurRadiusDp = parts[0].toIntOrNull()?.coerceIn(0, 80) ?: defaults.blurRadiusDp,
+        softLight = decimal(1, defaults.softLight),
+        saturation = decimal(2, defaults.saturation),
+        brightness = decimal(3, defaults.brightness),
+        darker = decimal(4, defaults.darker),
+        transparency = decimal(5, defaults.transparency),
+        burn = decimal(6, defaults.burn),
+        refraction = decimal(7, defaults.refraction),
+        edgeThickness = decimal(8, defaults.edgeThickness),
+        reflection = decimal(9, defaults.reflection),
+        directionalLightIntensity = decimal(10, defaults.directionalLightIntensity),
+        backgroundSaturation = decimal(11, defaults.backgroundSaturation),
+        backgroundBrightness = decimal(12, defaults.backgroundBrightness),
+        highlight = parts[13].toIntOrNull() == 1,
+    )
+}
+
+private fun SoftGlassParams.normalized() = copy(
+    blurRadiusDp = blurRadiusDp.coerceIn(0, 80),
+    softLight = softLight.coerceIn(-50.0, 50.0),
+    saturation = saturation.coerceIn(-50.0, 50.0),
+    brightness = brightness.coerceIn(-50.0, 50.0),
+    darker = darker.coerceIn(-50.0, 50.0),
+    transparency = transparency.coerceIn(-50.0, 50.0),
+    burn = burn.coerceIn(-50.0, 50.0),
+    refraction = refraction.coerceIn(-50.0, 50.0),
+    edgeThickness = edgeThickness.coerceIn(-50.0, 50.0),
+    reflection = reflection.coerceIn(-50.0, 50.0),
+    directionalLightIntensity = directionalLightIntensity.coerceIn(-50.0, 50.0),
+    backgroundSaturation = backgroundSaturation.coerceIn(-50.0, 50.0),
+    backgroundBrightness = backgroundBrightness.coerceIn(-50.0, 50.0),
+)
+
 private const val KEY_TUTORIAL_CARD_ENABLED = "tutorial_card_enabled"
 private const val KEY_TUTORIAL_CARD_TITLE = "tutorial_card_title"
 private const val KEY_TUTORIAL_CARD_SLOGAN = "tutorial_card_slogan"
@@ -105,6 +224,11 @@ private const val KEY_STYLE2_BACKGROUND_BLUR = "style2_background_blur"
 private const val KEY_STYLE2_BACKGROUND_VERTICAL_OFFSET = "style2_background_vertical_offset"
 private const val KEY_STYLE2_BACKGROUND_HORIZONTAL_OFFSET = "style2_background_horizontal_offset"
 private const val KEY_STYLE2_BACKGROUND_SCALE = "style2_background_scale"
+private const val KEY_COS_CARD_TITLE = "cos_card_title"
+private const val KEY_COS_CARD_SUBTITLE = "cos_card_subtitle"
+private const val KEY_COS_CARD_SIGNATURE = "cos_card_signature"
+private const val KEY_STYLE_RENUMBER_MIGRATED = "style_renumber_migrated"
+private const val KEY_DEVICE_BACKGROUND_PRELOAD = "device_background_preload"
 
 data class SettingsAppearanceSettings(
     val homeEnabled: Boolean = false,
@@ -124,6 +248,27 @@ data class SettingsAppearanceSettings(
     val logoMime: String = "",
     val logoVersion: Long = 0L,
     val lightCardOpacity: Int = 100,
+    val customCardEnabled: Boolean = false,
+    val lightCardColor: Int = DEFAULT_LIGHT_CARD_COLOR,
+    val darkCardColor: Int = DEFAULT_DARK_CARD_COLOR,
+    val cardBackgroundMode: Int = CARD_BACKGROUND_COLOR,
+    val lightFrostColor: Int = DEFAULT_LIGHT_FROST_COLOR,
+    val darkFrostColor: Int = DEFAULT_DARK_FROST_COLOR,
+    val lightCardBlur: Int = DEFAULT_CARD_BLUR,
+    val darkCardBlur: Int = DEFAULT_CARD_BLUR,
+    val lightSoftGlass: SoftGlassParams = SoftGlassParams(),
+    val darkSoftGlass: SoftGlassParams = SoftGlassParams(),
+    val cardDarkFollowsLight: Boolean = false,
+    val componentGroupCard: Boolean = true,
+    val componentStandaloneCard: Boolean = true,
+    val componentPopup: Boolean = true,
+    val componentSearch: Boolean = true,
+    val componentFloatingBar: Boolean = true,
+    val componentTopBarButton: Boolean = false,
+    val componentGlobalWallpaper: Boolean = true,
+    val componentLayoutCleanup: Boolean = false,
+    val disabledAppScopes: Set<String> = emptySet(),
+    val disabledAppComponents: Set<String> = emptySet(),
     val tutorialCardEnabled: Boolean = false,
     val tutorialCardTitle: String = "",
     val tutorialCardSlogan: String = "",
@@ -186,12 +331,34 @@ data class SettingsAppearanceSettings(
     val style2BackgroundVerticalOffset: Int = 0,
     val style2BackgroundHorizontalOffset: Int = 0,
     val style2BackgroundScale: Int = 100,
+    val cosCardTitle: String = COS_CARD_DEFAULT_TITLE,
+    val cosCardSubtitle: String = COS_CARD_DEFAULT_SUBTITLE,
+    val cosCardSignature: String = COS_CARD_DEFAULT_SIGNATURE,
+    val deviceBackgroundPreload: Boolean = false,
 )
 
 class SettingsAppearanceStore(context: Context) {
+    private val resolver = context.applicationContext.contentResolver
     private val local = context.getSharedPreferences(SETTINGS_APPEARANCE_PREFERENCES, Context.MODE_PRIVATE)
-    var settings: SettingsAppearanceSettings = local.toSettingsAppearance()
+    var settings: SettingsAppearanceSettings = run {
+        migrateStyleRenumber()
+        local.toSettingsAppearance()
+    }
         private set
+
+    /**
+     * 样式重排一次性迁移：旧版值 2 = Harmony 样式，新版 2 = COS 样式、Harmony 顺延为 3。
+     * 仅迁移显式选过 2 的安装，标记位保证只执行一次。
+     */
+    private fun migrateStyleRenumber() {
+        if (local.getBoolean(KEY_STYLE_RENUMBER_MIGRATED, false)) return
+        val harmonySelected = local.contains(KEY_DEVICE_INTERFACE_STYLE) &&
+            local.getInt(KEY_DEVICE_INTERFACE_STYLE, DEVICE_INTERFACE_STYLE_SYSTEM) == DEVICE_INTERFACE_STYLE_TWO
+        local.edit()
+            .putBoolean(KEY_STYLE_RENUMBER_MIGRATED, true)
+            .apply { if (harmonySelected) putInt(KEY_DEVICE_INTERFACE_STYLE, DEVICE_INTERFACE_STYLE_THREE) }
+            .apply()
+    }
 
     fun reload() {
         settings = local.toSettingsAppearance()
@@ -202,12 +369,18 @@ class SettingsAppearanceStore(context: Context) {
         settings = if (remote.contains(KEY_INITIALIZED)) remote.toSettingsAppearance() else settings
         remote.writeSettingsAppearance(settings)
         local.writeSettingsAppearance(settings)
+        notifyChanged()
     }
 
     fun update(service: XposedService?, transform: (SettingsAppearanceSettings) -> SettingsAppearanceSettings) {
         settings = transform(settings).normalized()
         local.writeSettingsAppearance(settings)
         service?.getRemotePreferences(SETTINGS_APPEARANCE_PREFERENCES)?.writeSettingsAppearance(settings)
+        notifyChanged()
+    }
+
+    private fun notifyChanged() {
+        resolver.notifyChange(android.net.Uri.parse("content://$SETTINGS_APPEARANCE_AUTHORITY"), null)
     }
 }
 
@@ -229,6 +402,27 @@ internal fun SharedPreferences.toSettingsAppearance() = SettingsAppearanceSettin
     logoMime = getString(KEY_LOGO_MIME, "").orEmpty(),
     logoVersion = getLong(KEY_LOGO_VERSION, 0L),
     lightCardOpacity = getInt(KEY_LIGHT_CARD_OPACITY, 100),
+    customCardEnabled = getBoolean(KEY_CUSTOM_CARD_ENABLED, false),
+    lightCardColor = getInt(KEY_LIGHT_CARD_COLOR, DEFAULT_LIGHT_CARD_COLOR),
+    darkCardColor = getInt(KEY_DARK_CARD_COLOR, DEFAULT_DARK_CARD_COLOR),
+    cardBackgroundMode = getInt(KEY_CARD_BACKGROUND_MODE, CARD_BACKGROUND_COLOR),
+    lightFrostColor = getInt(KEY_LIGHT_FROST_COLOR, DEFAULT_LIGHT_FROST_COLOR),
+    darkFrostColor = getInt(KEY_DARK_FROST_COLOR, DEFAULT_DARK_FROST_COLOR),
+    lightCardBlur = getInt(KEY_LIGHT_CARD_BLUR, DEFAULT_CARD_BLUR),
+    darkCardBlur = getInt(KEY_DARK_CARD_BLUR, DEFAULT_CARD_BLUR),
+    lightSoftGlass = decodeSoftGlass(getString(KEY_LIGHT_SOFT_GLASS, null)),
+    darkSoftGlass = decodeSoftGlass(getString(KEY_DARK_SOFT_GLASS, null)),
+    cardDarkFollowsLight = getBoolean(KEY_CARD_DARK_FOLLOWS_LIGHT, false),
+    componentGroupCard = getBoolean(KEY_COMPONENT_GROUP_CARD, true),
+    componentStandaloneCard = getBoolean(KEY_COMPONENT_STANDALONE_CARD, true),
+    componentPopup = getBoolean(KEY_COMPONENT_POPUP, true),
+    componentSearch = getBoolean(KEY_COMPONENT_SEARCH, true),
+    componentFloatingBar = getBoolean(KEY_COMPONENT_FLOATING_BAR, true),
+    componentTopBarButton = getBoolean(KEY_COMPONENT_TOP_BAR_BUTTON, false),
+    componentGlobalWallpaper = getBoolean(KEY_COMPONENT_GLOBAL_WALLPAPER, true),
+    componentLayoutCleanup = getBoolean(KEY_COMPONENT_LAYOUT_CLEANUP, false),
+    disabledAppScopes = getStringSet(KEY_APP_SCOPE_DISABLED, emptySet())?.toSet().orEmpty(),
+    disabledAppComponents = getStringSet(KEY_APP_COMPONENT_DISABLED, emptySet())?.toSet().orEmpty(),
     tutorialCardEnabled = getBoolean(KEY_TUTORIAL_CARD_ENABLED, false),
     tutorialCardTitle = getString(KEY_TUTORIAL_CARD_TITLE, "").orEmpty(),
     tutorialCardSlogan = getString(KEY_TUTORIAL_CARD_SLOGAN, "").orEmpty(),
@@ -291,6 +485,10 @@ internal fun SharedPreferences.toSettingsAppearance() = SettingsAppearanceSettin
     style2BackgroundVerticalOffset = getInt(KEY_STYLE2_BACKGROUND_VERTICAL_OFFSET, 0),
     style2BackgroundHorizontalOffset = getInt(KEY_STYLE2_BACKGROUND_HORIZONTAL_OFFSET, 0),
     style2BackgroundScale = getInt(KEY_STYLE2_BACKGROUND_SCALE, 100),
+    cosCardTitle = getString(KEY_COS_CARD_TITLE, COS_CARD_DEFAULT_TITLE).orEmpty().ifBlank { COS_CARD_DEFAULT_TITLE },
+    cosCardSubtitle = getString(KEY_COS_CARD_SUBTITLE, COS_CARD_DEFAULT_SUBTITLE).orEmpty().ifBlank { COS_CARD_DEFAULT_SUBTITLE },
+    cosCardSignature = getString(KEY_COS_CARD_SIGNATURE, COS_CARD_DEFAULT_SIGNATURE).orEmpty().ifBlank { COS_CARD_DEFAULT_SIGNATURE },
+    deviceBackgroundPreload = getBoolean(KEY_DEVICE_BACKGROUND_PRELOAD, false),
 ).normalized()
 
 private fun SettingsAppearanceSettings.normalized() = copy(
@@ -303,6 +501,11 @@ private fun SettingsAppearanceSettings.normalized() = copy(
     logoMode = logoMode.coerceIn(LOGO_MODE_SYSTEM, LOGO_MODE_KEEP_ADVANCED_MATERIAL),
     logoScale = logoScale.coerceIn(50, 200),
     lightCardOpacity = lightCardOpacity.coerceIn(0, 100),
+    cardBackgroundMode = cardBackgroundMode.coerceIn(CARD_BACKGROUND_COLOR, CARD_BACKGROUND_SOFT_GLASS),
+    lightCardBlur = lightCardBlur.coerceIn(0, 80),
+    darkCardBlur = darkCardBlur.coerceIn(0, 80),
+    lightSoftGlass = lightSoftGlass.normalized(),
+    darkSoftGlass = darkSoftGlass.normalized(),
     tutorialCardImageScale = tutorialCardImageScale.coerceIn(40, 200),
     tutorialCardLogoVerticalOffset = tutorialCardLogoVerticalOffset.coerceIn(-120, 120),
     tutorialCardLogoScale = tutorialCardLogoScale.coerceIn(40, 200),
@@ -312,7 +515,7 @@ private fun SettingsAppearanceSettings.normalized() = copy(
     tutorialCardBackgroundVerticalOffset = tutorialCardBackgroundVerticalOffset.coerceIn(-120, 120),
     tutorialCardBackgroundHorizontalOffset = tutorialCardBackgroundHorizontalOffset.coerceIn(-120, 120),
     tutorialCardBackgroundScale = tutorialCardBackgroundScale.coerceIn(40, 200),
-    deviceInterfaceStyle = deviceInterfaceStyle.coerceIn(DEVICE_INTERFACE_STYLE_SYSTEM, DEVICE_INTERFACE_STYLE_TWO),
+    deviceInterfaceStyle = deviceInterfaceStyle.coerceIn(DEVICE_INTERFACE_STYLE_SYSTEM, DEVICE_INTERFACE_STYLE_THREE),
     style2ImageScale = style2ImageScale.coerceIn(40, 200),
     style2LogoVerticalOffset = style2LogoVerticalOffset.coerceIn(-120, 120),
     style2LogoVerticalOffsetLeft = style2LogoVerticalOffsetLeft.coerceIn(-120, 120),
@@ -345,6 +548,10 @@ private fun SettingsAppearanceSettings.normalized() = copy(
     style2BackgroundVerticalOffset = style2BackgroundVerticalOffset.coerceIn(-120, 120),
     style2BackgroundHorizontalOffset = style2BackgroundHorizontalOffset.coerceIn(-120, 120),
     style2BackgroundScale = style2BackgroundScale.coerceIn(40, 200),
+    disabledAppScopes = disabledAppScopes.filterTo(mutableSetOf()) { it.isNotBlank() },
+    disabledAppComponents = disabledAppComponents.filterTo(mutableSetOf()) {
+        it.isNotBlank() && ComponentKeys.packageOf(it).isNotBlank()
+    },
 )
 
 private fun SharedPreferences.writeSettingsAppearance(value: SettingsAppearanceSettings) {
@@ -367,6 +574,27 @@ private fun SharedPreferences.writeSettingsAppearance(value: SettingsAppearanceS
         .putString(KEY_LOGO_MIME, value.logoMime)
         .putLong(KEY_LOGO_VERSION, value.logoVersion)
         .putInt(KEY_LIGHT_CARD_OPACITY, value.lightCardOpacity)
+        .putBoolean(KEY_CUSTOM_CARD_ENABLED, value.customCardEnabled)
+        .putInt(KEY_LIGHT_CARD_COLOR, value.lightCardColor)
+        .putInt(KEY_DARK_CARD_COLOR, value.darkCardColor)
+        .putInt(KEY_CARD_BACKGROUND_MODE, value.cardBackgroundMode)
+        .putInt(KEY_LIGHT_FROST_COLOR, value.lightFrostColor)
+        .putInt(KEY_DARK_FROST_COLOR, value.darkFrostColor)
+        .putInt(KEY_LIGHT_CARD_BLUR, value.lightCardBlur)
+        .putInt(KEY_DARK_CARD_BLUR, value.darkCardBlur)
+        .putString(KEY_LIGHT_SOFT_GLASS, value.lightSoftGlass.encodeSoftGlass())
+        .putString(KEY_DARK_SOFT_GLASS, value.darkSoftGlass.encodeSoftGlass())
+        .putBoolean(KEY_CARD_DARK_FOLLOWS_LIGHT, value.cardDarkFollowsLight)
+        .putBoolean(KEY_COMPONENT_GROUP_CARD, value.componentGroupCard)
+        .putBoolean(KEY_COMPONENT_STANDALONE_CARD, value.componentStandaloneCard)
+        .putBoolean(KEY_COMPONENT_POPUP, value.componentPopup)
+        .putBoolean(KEY_COMPONENT_SEARCH, value.componentSearch)
+        .putBoolean(KEY_COMPONENT_FLOATING_BAR, value.componentFloatingBar)
+        .putBoolean(KEY_COMPONENT_TOP_BAR_BUTTON, value.componentTopBarButton)
+        .putBoolean(KEY_COMPONENT_GLOBAL_WALLPAPER, value.componentGlobalWallpaper)
+        .putBoolean(KEY_COMPONENT_LAYOUT_CLEANUP, value.componentLayoutCleanup)
+        .putStringSet(KEY_APP_SCOPE_DISABLED, value.disabledAppScopes.toMutableSet())
+        .putStringSet(KEY_APP_COMPONENT_DISABLED, value.disabledAppComponents.toMutableSet())
         .putBoolean(KEY_TUTORIAL_CARD_ENABLED, value.tutorialCardEnabled)
         .putString(KEY_TUTORIAL_CARD_TITLE, value.tutorialCardTitle)
         .putString(KEY_TUTORIAL_CARD_SLOGAN, value.tutorialCardSlogan)
@@ -429,6 +657,11 @@ private fun SharedPreferences.writeSettingsAppearance(value: SettingsAppearanceS
         .putInt(KEY_STYLE2_BACKGROUND_VERTICAL_OFFSET, value.style2BackgroundVerticalOffset)
         .putInt(KEY_STYLE2_BACKGROUND_HORIZONTAL_OFFSET, value.style2BackgroundHorizontalOffset)
         .putInt(KEY_STYLE2_BACKGROUND_SCALE, value.style2BackgroundScale)
+        .putString(KEY_COS_CARD_TITLE, value.cosCardTitle)
+        .putString(KEY_COS_CARD_SUBTITLE, value.cosCardSubtitle)
+        .putString(KEY_COS_CARD_SIGNATURE, value.cosCardSignature)
+        .putBoolean(KEY_DEVICE_BACKGROUND_PRELOAD, value.deviceBackgroundPreload)
+        .putBoolean(KEY_STYLE_RENUMBER_MIGRATED, true)
         .apply()
 }
 
@@ -436,6 +669,52 @@ private fun SharedPreferences.getFloatCompat(key: String, default: Float): Float
     runCatching { getFloat(key, default) }.getOrElse {
         runCatching { getInt(key, default.toInt()).toFloat() }.getOrDefault(default)
     }
+
+fun SettingsAppearanceSettings.withAppScopeEnabled(packageName: String, enabled: Boolean): SettingsAppearanceSettings =
+    copy(
+        disabledAppScopes = if (enabled) {
+            disabledAppScopes - packageName
+        } else {
+            disabledAppScopes + packageName
+        },
+    )
+
+/** 「组件作用域」页里某个组件类型的全局开关值。未知键按启用处理（新组件默认跟随）。 */
+fun SettingsAppearanceSettings.componentEnabled(component: String): Boolean = when (component) {
+    ComponentKeys.GROUP_CARD -> componentGroupCard
+    ComponentKeys.STANDALONE_CARD -> componentStandaloneCard
+    ComponentKeys.POPUP -> componentPopup
+    ComponentKeys.SEARCH -> componentSearch
+    ComponentKeys.FLOATING_BAR -> componentFloatingBar
+    ComponentKeys.TOP_BAR_BUTTON -> componentTopBarButton
+    ComponentKeys.GLOBAL_WALLPAPER -> componentGlobalWallpaper
+    ComponentKeys.LAYOUT_CLEANUP -> componentLayoutCleanup
+    else -> true
+}
+
+/** 该包是否套用了某个组件：整包开关与全局组件开关都为开，且该包该组件没被单独关掉。 */
+fun SettingsAppearanceSettings.isComponentEnabledFor(packageName: String?, component: String): Boolean {
+    if (!componentEnabled(component)) return false
+    val pkg = packageName ?: return true
+    if (pkg in disabledAppScopes) return false
+    return ComponentKeys.encode(component, pkg) !in disabledAppComponents
+}
+
+/** 单独开关「某包的某组件」；开启 = 从禁用集合移除，关闭 = 加入。 */
+fun SettingsAppearanceSettings.withAppComponentEnabled(
+    packageName: String,
+    component: String,
+    enabled: Boolean,
+): SettingsAppearanceSettings {
+    val entry = ComponentKeys.encode(component, packageName)
+    return copy(
+        disabledAppComponents = if (enabled) {
+            disabledAppComponents - entry
+        } else {
+            disabledAppComponents + entry
+        },
+    )
+}
 
 fun SettingsAppearanceSettings.style2LogoHorizontalOffsetForAlignment(alignment: Int = style2LogoAlignment): Int = when (alignment.coerceIn(0, 2)) {
     0 -> style2LogoHorizontalOffsetLeft

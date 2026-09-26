@@ -1,5 +1,8 @@
 package com.ciallo.hyperbackground.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.ImageDecoder
 import android.graphics.RenderEffect
@@ -25,9 +28,14 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -39,6 +47,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -50,23 +59,37 @@ import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.ciallo.hyperbackground.BackgroundContract
-import com.ciallo.hyperbackground.ConfigManager
+import com.ciallo.hyperbackground.util.ConfigManager
 import com.ciallo.hyperbackground.R
 import com.ciallo.hyperbackground.appearance.AppearanceUiController
+import com.ciallo.hyperbackground.appearance.CardConfigCodec
 import com.ciallo.hyperbackground.appearance.DeviceProfileSettings
 import com.ciallo.hyperbackground.appearance.SettingsAppearanceSettings
 import com.ciallo.hyperbackground.ui.pages.BackgroundDetailPage
 import com.ciallo.hyperbackground.ui.pages.AboutPage
+import com.ciallo.hyperbackground.ui.pages.AppScopePage
+import com.ciallo.hyperbackground.ui.pages.AppScopeDetailPage
 import com.ciallo.hyperbackground.ui.pages.ChangelogPage
+import com.ciallo.hyperbackground.ui.pages.ComponentScopePage
+import com.ciallo.hyperbackground.ui.pages.DonatePage
 import com.ciallo.hyperbackground.ui.pages.DeviceCardPage
 import com.ciallo.hyperbackground.ui.pages.DeviceInfoPage
+import com.ciallo.hyperbackground.ui.pages.DynamicMaterialPage
+import com.ciallo.hyperbackground.ui.pages.DECLARED_SCOPE_PACKAGES
 import com.ciallo.hyperbackground.ui.pages.HomePage
 import com.ciallo.hyperbackground.ui.pages.SettingsPage
+import com.ciallo.hyperbackground.ui.pages.SettingsCardMaterialPage
 import com.ciallo.hyperbackground.ui.pages.RandomBackgroundPage
 import com.ciallo.hyperbackground.ui.pages.RestartScopesDialog
+import com.ciallo.hyperbackground.ui.pages.readScopePackages
+import com.ciallo.hyperbackground.ui.pages.scopedAppLabel
 import com.ciallo.hyperbackground.ui.pages.UpdateAvailableDialog
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.DropdownEntry
+import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.FloatingNavigationBar
@@ -75,20 +98,27 @@ import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.NavigationBar
 import top.yukonga.miuix.kmp.basic.NavigationBarItem
 import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.TabRow
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.basic.rememberTopAppBarState
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
 import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.All
 import top.yukonga.miuix.kmp.icon.extended.Back
 import top.yukonga.miuix.kmp.icon.extended.Home
 import top.yukonga.miuix.kmp.icon.extended.Info
+import top.yukonga.miuix.kmp.icon.extended.More
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Refresh
+import top.yukonga.miuix.kmp.menu.OverlayIconDropdownMenu
 import top.yukonga.miuix.kmp.theme.ColorSchemeMode
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.ThemeController
+import top.yukonga.miuix.kmp.window.WindowDialog
 
 class MainActivity : ComponentActivity() {
     lateinit var config: ConfigManager
@@ -220,6 +250,35 @@ class MainActivity : ComponentActivity() {
         }.onFailure {
             toast(getString(R.string.save_failed, it.message ?: "Unknown error"))
         }
+    }
+
+    /** 导出当前卡片配置到剪贴板；JSON 结构（version/type/card）见 CardConfigCodec。 */
+    private fun exportCardConfig(clipboard: ClipboardManager) {
+        runCatching {
+            val json = CardConfigCodec.encode(appearance)
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText(getString(R.string.settings_card_material_title), json),
+            )
+        }.onSuccess {
+            toast(R.string.settings_card_export_done)
+        }.onFailure {
+            toast(getString(R.string.save_failed, it.message ?: "Unknown error"))
+        }
+    }
+
+    /** 从剪贴板导入卡片配置：version/type 校验通过后只覆盖卡片字段，其余外观配置保持不动。 */
+    private fun importCardConfig(clipboard: ClipboardManager) {
+        val raw = clipboard.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim().orEmpty()
+        if (raw.isBlank()) {
+            toast(R.string.settings_card_import_empty)
+            return
+        }
+        runCatching { CardConfigCodec.decode(raw) }
+            .onSuccess { incoming ->
+                updateAppearance { CardConfigCodec.mergeCard(it, incoming) }
+                toast(R.string.settings_card_import_done)
+            }
+            .onFailure { toast(R.string.settings_card_import_failed) }
     }
 
     /**
@@ -370,16 +429,33 @@ class MainActivity : ComponentActivity() {
         onMonet: (Boolean) -> Unit,
         onAccent: (Int) -> Unit,
     ) {
-        var detailSlot by rememberSaveable { mutableStateOf<String?>(null) }
-        BackHandler(enabled = detailSlot != null) { detailSlot = null }
+        // 导航栈：主页 → 背景详情 → 卡片材质等三级页面逐层压栈，返回逐层弹出。
+        var detailStack by rememberSaveable(
+            stateSaver = listSaver(
+                save = { stack: ArrayList<String> -> stack },
+                restore = { values -> ArrayList(values) },
+            ),
+        ) { mutableStateOf(ArrayList<String>()) }
+        val openRoute: (String) -> Unit = { route ->
+            detailStack = ArrayList(detailStack).apply { add(route) }
+        }
+        val popRoute: () -> Unit = {
+            if (detailStack.isNotEmpty()) detailStack = ArrayList(detailStack.dropLast(1))
+        }
+        BackHandler(enabled = detailStack.isNotEmpty()) { popRoute() }
+        // 底部 Tab 分页状态提升到导航层：进入二级页时 MainTabs 会离屏，
+        // 返回后需保持原 tab 位置（如从动态适配页进入二级页，返回仍回到动态适配页）。
+        val pagerState = rememberPagerState(pageCount = { 4 })
+        val scope = rememberCoroutineScope()
         // 共享背景层放在 AnimatedContent 之外：页面切换时只有内容滑动，背景保持不动。
         Box(Modifier.fillMaxSize()) {
             ModuleBackground(revision)
             AnimatedContent(
-                targetState = detailSlot,
+                targetState = detailStack,
                 modifier = Modifier.fillMaxSize(),
                 transitionSpec = {
-                    if (targetState != null) {
+                    // 目标层级更深为 push（左滑进入），更浅为 pop（右滑返回）。
+                    if (targetState.size > initialState.size) {
                         (slideIntoContainer(
                             AnimatedContentTransitionScope.SlideDirection.Left,
                             animationSpec = tween(360, easing = EaseInOut),
@@ -400,9 +476,11 @@ class MainActivity : ComponentActivity() {
                     }.using(SizeTransform(clip = true))
                 },
                 label = "screen-navigation",
-            ) { slot ->
-                when (slot) {
+            ) { stack ->
+                when (val slot = stack.lastOrNull()) {
                     null -> MainTabs(
+                    pagerState = pagerState,
+                    scope = scope,
                     themeMode = themeMode,
                     themeColorEnabled = themeColorEnabled,
                     monet = monet,
@@ -411,14 +489,35 @@ class MainActivity : ComponentActivity() {
                     onThemeColorEnabled = onThemeColorEnabled,
                     onMonet = onMonet,
                     onAccent = onAccent,
-                    onOpenBackground = { detailSlot = it },
-                    onOpenChangelog = { detailSlot = ROUTE_CHANGELOG },
+                    onOpenBackground = openRoute,
+                    onOpenRoute = openRoute,
+                    onOpenChangelog = { openRoute(ROUTE_CHANGELOG) },
+                    onOpenDonate = { openRoute(ROUTE_DONATE) },
                 )
-                    ROUTE_CHANGELOG -> ChangelogScreen(onBack = { detailSlot = null })
-                    ROUTE_DEVICE_CARD -> DeviceCardScreen(onBack = { detailSlot = null })
-                    ROUTE_DEVICE_INFO -> DeviceInfoScreen(onBack = { detailSlot = null })
-                    ROUTE_RANDOM_BG -> RandomBackgroundScreen(onBack = { detailSlot = null })
-                    else -> BackgroundDetailScreen(slot = slot, onBack = { detailSlot = null })
+                    ROUTE_CHANGELOG -> ChangelogScreen(onBack = popRoute)
+                    ROUTE_DONATE -> DonateScreen(onBack = popRoute)
+                    ROUTE_DEVICE_CARD -> DeviceCardScreen(onBack = popRoute)
+                    ROUTE_DEVICE_INFO -> DeviceInfoScreen(onBack = popRoute)
+                    ROUTE_RANDOM_BG -> RandomBackgroundScreen(onBack = popRoute)
+                    ROUTE_CARD_MATERIAL -> CardMaterialScreen(onBack = popRoute)
+                    ROUTE_COMPONENT_SCOPE -> ComponentScopeScreen(onBack = popRoute)
+                    ROUTE_APP_SCOPE -> AppScopeScreen(
+                        onBack = popRoute,
+                        onOpenApp = { packageName ->
+                            openRoute(ROUTE_APP_SCOPE_DETAIL_PREFIX + packageName)
+                        },
+                    )
+                    else -> if (slot.startsWith(ROUTE_APP_SCOPE_DETAIL_PREFIX)) {
+                        AppScopeDetailScreen(
+                            packageName = slot.removePrefix(ROUTE_APP_SCOPE_DETAIL_PREFIX),
+                            onBack = popRoute,
+                        )
+                    } else {
+                        BackgroundDetailScreen(
+                            slot = slot,
+                            onBack = popRoute,
+                        )
+                    }
                 }
             }
         }
@@ -426,6 +525,8 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun MainTabs(
+        pagerState: androidx.compose.foundation.pager.PagerState,
+        scope: kotlinx.coroutines.CoroutineScope,
         themeMode: Int,
         themeColorEnabled: Boolean,
         monet: Boolean,
@@ -435,10 +536,10 @@ class MainActivity : ComponentActivity() {
         onMonet: (Boolean) -> Unit,
         onAccent: (Int) -> Unit,
         onOpenBackground: (String) -> Unit,
+        onOpenRoute: (String) -> Unit,
         onOpenChangelog: () -> Unit,
+        onOpenDonate: () -> Unit,
     ) {
-        val pagerState = rememberPagerState(pageCount = { 3 })
-        val scope = rememberCoroutineScope()
         val backgroundColor = MiuixTheme.colorScheme.surface
         val backdrop = if (bottomBarBlurEnabled) {
             rememberLayerBackdrop {
@@ -449,6 +550,16 @@ class MainActivity : ComponentActivity() {
             null
         }
         var showRestartDialog by remember { mutableStateOf(false) }
+        var restartTargets by remember { mutableStateOf(emptyList<String>()) }
+        // 「重启」只作用于当前已启用的作用域：LSPosed 的实际作用域扣除「软件作用域」里被关掉的包。
+        // 读取要走 binder，所以先把名单算好再弹窗，避免文案先闪一个 0。
+        val requestRestart: () -> Unit = {
+            scope.launch {
+                val packages = readScopePackages().ifEmpty { DECLARED_SCOPE_PACKAGES }
+                restartTargets = packages.filterNot { it in appearance.disabledAppScopes }
+                showRestartDialog = true
+            }
+        }
         Scaffold(
             containerColor = Color.Transparent,
             bottomBar = {
@@ -485,6 +596,12 @@ class MainActivity : ComponentActivity() {
                         FloatingNavigationBarItem(
                             selected = pagerState.currentPage == 2,
                             onClick = { scope.launch { pagerState.animateScrollToPage(2) } },
+                            icon = MiuixIcons.All,
+                            label = getString(R.string.nav_dynamic),
+                        )
+                        FloatingNavigationBarItem(
+                            selected = pagerState.currentPage == 3,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(3) } },
                             icon = MiuixIcons.Info,
                             label = getString(R.string.nav_about),
                         )
@@ -510,6 +627,12 @@ class MainActivity : ComponentActivity() {
                         NavigationBarItem(
                             selected = pagerState.currentPage == 2,
                             onClick = { scope.launch { pagerState.animateScrollToPage(2) } },
+                            icon = MiuixIcons.All,
+                            label = getString(R.string.nav_dynamic),
+                        )
+                        NavigationBarItem(
+                            selected = pagerState.currentPage == 3,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(3) } },
                             icon = MiuixIcons.Info,
                             label = getString(R.string.nav_about),
                         )
@@ -531,7 +654,7 @@ class MainActivity : ComponentActivity() {
                             title = getString(R.string.nav_home),
                             bottomPadding = bottomPadding,
                             actions = {
-                                IconButton(onClick = { showRestartDialog = true }) {
+                                IconButton(onClick = requestRestart) {
                                     Icon(MiuixIcons.Refresh, contentDescription = getString(R.string.restart_scope))
                                 }
                             },
@@ -547,7 +670,7 @@ class MainActivity : ComponentActivity() {
                             title = getString(R.string.nav_settings),
                             bottomPadding = bottomPadding,
                             actions = {
-                                IconButton(onClick = { showRestartDialog = true }) {
+                                IconButton(onClick = requestRestart) {
                                     Icon(MiuixIcons.Refresh, contentDescription = getString(R.string.restart_scope))
                                 }
                             },
@@ -564,7 +687,20 @@ class MainActivity : ComponentActivity() {
                                 onThemeColorEnabled = onThemeColorEnabled,
                                 onMonet = onMonet,
                                 onAccent = onAccent,
-                                onOpenChangelog = { scope.launch { pagerState.animateScrollToPage(2) } },
+                                onOpenChangelog = { scope.launch { pagerState.animateScrollToPage(3) } },
+                            )
+                        }
+                        2 -> MainPageScaffold(
+                            title = getString(R.string.nav_dynamic),
+                            bottomPadding = bottomPadding,
+                        ) { padding, scrollModifier ->
+                            DynamicMaterialPage(
+                                activity = this@MainActivity,
+                                modifier = scrollModifier,
+                                padding = padding,
+                                onOpenMaterial = { onOpenRoute(ROUTE_CARD_MATERIAL) },
+                                onOpenComponentScope = { onOpenRoute(ROUTE_COMPONENT_SCOPE) },
+                                onOpenAppScope = { onOpenRoute(ROUTE_APP_SCOPE) },
                             )
                         }
                         else -> MainPageScaffold(
@@ -576,6 +712,7 @@ class MainActivity : ComponentActivity() {
                                 modifier = scrollModifier,
                                 padding = padding,
                                 onOpenChangelog = onOpenChangelog,
+                                onOpenDonate = onOpenDonate,
                             )
                         }
                     }
@@ -583,6 +720,7 @@ class MainActivity : ComponentActivity() {
             }
             RestartScopesDialog(
                 activity = this@MainActivity,
+                targets = restartTargets,
                 show = showRestartDialog,
                 onDismissRequest = { showRestartDialog = false },
             )
@@ -638,6 +776,8 @@ class MainActivity : ComponentActivity() {
             BackgroundContract.HOME -> getString(R.string.background_home)
             BackgroundContract.DEVICE -> getString(R.string.background_device)
             BackgroundContract.CONTACTS -> getString(R.string.background_contacts)
+            BackgroundContract.MMS -> getString(R.string.background_mms)
+            BackgroundContract.MMS_CHAT -> getString(R.string.background_mms_chat)
             else -> getString(R.string.background_global)
         }
         Scaffold(
@@ -663,6 +803,222 @@ class MainActivity : ComponentActivity() {
                 slot = slot,
                 revision = revision,
             )
+        }
+    }
+
+    @Composable
+    private fun ComponentScopeScreen(onBack: () -> Unit) {
+        val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
+        val hasUiBackground = remember(revision) { currentUiBackgroundFile().isFile }
+        val topBarColor = if (hasUiBackground) {
+            Color.Transparent
+        } else {
+            MiuixTheme.colorScheme.surface.copy(alpha = cardOpacity)
+        }
+        val title = getString(R.string.component_scope_title)
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    color = topBarColor,
+                    title = title,
+                    largeTitle = title,
+                    scrollBehavior = scrollBehavior,
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(MiuixIcons.Back, contentDescription = getString(R.string.back))
+                        }
+                    },
+                )
+            },
+        ) { padding ->
+            ComponentScopePage(
+                activity = this@MainActivity,
+                modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+                padding = padding,
+            )
+        }
+    }
+
+    @Composable
+    private fun AppScopeScreen(onBack: () -> Unit, onOpenApp: (String) -> Unit) {
+        val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
+        val hasUiBackground = remember(revision) { currentUiBackgroundFile().isFile }
+        val topBarColor = if (hasUiBackground) {
+            Color.Transparent
+        } else {
+            MiuixTheme.colorScheme.surface.copy(alpha = cardOpacity)
+        }
+        val title = getString(R.string.app_scope_title)
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    color = topBarColor,
+                    title = title,
+                    largeTitle = title,
+                    scrollBehavior = scrollBehavior,
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(MiuixIcons.Back, contentDescription = getString(R.string.back))
+                        }
+                    },
+                )
+            },
+        ) { padding ->
+            AppScopePage(
+                activity = this@MainActivity,
+                modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+                padding = padding,
+                onOpenApp = onOpenApp,
+            )
+        }
+    }
+
+    /** 软件作用域详情页：顶栏标题取该应用名，解析不到时退回包名。 */
+    @Composable
+    private fun AppScopeDetailScreen(packageName: String, onBack: () -> Unit) {
+        val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
+        val hasUiBackground = remember(revision) { currentUiBackgroundFile().isFile }
+        val topBarColor = if (hasUiBackground) {
+            Color.Transparent
+        } else {
+            MiuixTheme.colorScheme.surface.copy(alpha = cardOpacity)
+        }
+        val title = remember(packageName) { scopedAppLabel(this@MainActivity, packageName) }
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    color = topBarColor,
+                    title = title,
+                    largeTitle = title,
+                    scrollBehavior = scrollBehavior,
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(MiuixIcons.Back, contentDescription = getString(R.string.back))
+                        }
+                    },
+                )
+            },
+        ) { padding ->
+            AppScopeDetailPage(
+                activity = this@MainActivity,
+                packageName = packageName,
+                modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+                padding = padding,
+            )
+        }
+    }
+
+    /**
+     * 卡片材质二级页：顶栏下浅色/深色 TabRow，右上角菜单提供「导出配置 / 导入配置 / 恢复默认」，
+     * 布局与交互对齐 IslandMaterialPage；配置导出到剪贴板、导入前校验 version/type 标识。
+     */
+    @Composable
+    private fun CardMaterialScreen(onBack: () -> Unit) {
+        val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
+        val hasUiBackground = remember(revision) { currentUiBackgroundFile().isFile }
+        val topBarColor = if (hasUiBackground) {
+            Color.Transparent
+        } else {
+            MiuixTheme.colorScheme.surface.copy(alpha = cardOpacity)
+        }
+        val title = getString(R.string.settings_card_material_title)
+        val pagerState = rememberPagerState(pageCount = { 2 })
+        val scope = rememberCoroutineScope()
+        val clipboard = remember { this@MainActivity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
+        var resetDialog by remember { mutableStateOf(false) }
+        val menuEntry = DropdownEntry(
+            items = listOf(
+                DropdownItem(
+                    text = getString(R.string.settings_card_export),
+                    onClick = { exportCardConfig(clipboard) },
+                ),
+                DropdownItem(
+                    text = getString(R.string.settings_card_import),
+                    onClick = { importCardConfig(clipboard) },
+                ),
+                DropdownItem(
+                    text = getString(R.string.settings_card_reset),
+                    onClick = { resetDialog = true },
+                ),
+            ),
+        )
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                Column {
+                    TopAppBar(
+                        color = topBarColor,
+                        title = title,
+                        largeTitle = title,
+                        scrollBehavior = scrollBehavior,
+                        navigationIcon = {
+                            IconButton(onClick = onBack) {
+                                Icon(MiuixIcons.Back, contentDescription = getString(R.string.back))
+                            }
+                        },
+                        actions = {
+                            OverlayIconDropdownMenu(entry = menuEntry) {
+                                Icon(
+                                    MiuixIcons.More,
+                                    contentDescription = getString(R.string.settings_card_menu_actions),
+                                )
+                            }
+                        },
+                    )
+                    TabRow(
+                        tabs = listOf(
+                            getString(R.string.settings_card_tab_light),
+                            getString(R.string.settings_card_tab_dark),
+                        ),
+                        selectedTabIndex = pagerState.currentPage,
+                        onTabSelected = { page ->
+                            scope.launch { pagerState.animateScrollToPage(page) }
+                        },
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                    )
+                }
+            },
+        ) { padding ->
+            SettingsCardMaterialPage(
+                activity = this@MainActivity,
+                modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+                padding = padding,
+                pagerState = pagerState,
+            )
+        }
+        WindowDialog(
+            show = resetDialog,
+            title = getString(R.string.settings_card_reset),
+            onDismissRequest = { resetDialog = false },
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text(
+                    text = getString(R.string.settings_card_reset_confirm),
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    TextButton(
+                        text = getString(R.string.cancel),
+                        onClick = { resetDialog = false },
+                        modifier = Modifier.weight(1f),
+                    )
+                    Button(
+                        onClick = {
+                            updateAppearance { CardConfigCodec.reset(it) }
+                            resetDialog = false
+                            toast(R.string.restore_default)
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColorsPrimary(),
+                    ) { Text(getString(R.string.confirm)) }
+                }
+            }
         }
     }
 
@@ -693,6 +1049,40 @@ class MainActivity : ComponentActivity() {
             },
         ) { padding ->
             ChangelogPage(
+                activity = this@MainActivity,
+                modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+                padding = padding,
+            )
+        }
+    }
+
+    @Composable
+    private fun DonateScreen(onBack: () -> Unit) {
+        val scrollBehavior = MiuixScrollBehavior(rememberTopAppBarState())
+        val hasUiBackground = remember(revision) { currentUiBackgroundFile().isFile }
+        val topBarColor = if (hasUiBackground) {
+            Color.Transparent
+        } else {
+            MiuixTheme.colorScheme.surface.copy(alpha = cardOpacity)
+        }
+        val title = getString(R.string.donate)
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    color = topBarColor,
+                    title = title,
+                    largeTitle = title,
+                    scrollBehavior = scrollBehavior,
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(MiuixIcons.Back, contentDescription = getString(R.string.back))
+                        }
+                    },
+                )
+            },
+        ) { padding ->
+            DonatePage(
                 activity = this@MainActivity,
                 modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
                 padding = padding,
@@ -854,8 +1244,14 @@ class MainActivity : ComponentActivity() {
         // 二级页导航哨兵：复用 detailSlot 的 AnimatedContent/返回动画承载更新日志与外观页，
         // 取一个不会与背景 slot（home/device/global）冲突的值。
         const val ROUTE_CHANGELOG = "__changelog__"
+        const val ROUTE_DONATE = "__donate__"
         const val ROUTE_DEVICE_CARD = "__appearance_device_card__"
         const val ROUTE_DEVICE_INFO = "__appearance_device_info__"
         const val ROUTE_RANDOM_BG = "__random_bg__"
+        const val ROUTE_CARD_MATERIAL = "__card_material__"
+        const val ROUTE_COMPONENT_SCOPE = "__component_scope__"
+        const val ROUTE_APP_SCOPE = "__app_scope__"
+        // 软件作用域详情页：路由 = 前缀 + 包名（包名不含 '|'，前缀本身以 '|' 结尾，无歧义）。
+        const val ROUTE_APP_SCOPE_DETAIL_PREFIX = "__app_scope_detail__|"
     }
 }

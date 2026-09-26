@@ -41,7 +41,8 @@ import androidx.compose.ui.unit.dp
 import com.ciallo.hyperbackground.BackgroundContract
 import com.ciallo.hyperbackground.BuildConfig
 import com.ciallo.hyperbackground.R
-import com.ciallo.hyperbackground.RootShell
+import com.ciallo.hyperbackground.util.DesktopIcon
+import com.ciallo.hyperbackground.util.RootShell
 import com.ciallo.hyperbackground.ui.MainActivity
 import com.ciallo.hyperbackground.ui.components.SectionTitle
 import com.ciallo.hyperbackground.ui.components.BackgroundPickerPreference
@@ -88,6 +89,8 @@ fun SettingsPage(
         ),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        item { SectionTitle(stringResource(R.string.config)) }
+        item { ModuleConfigCard(activity) }
         item { SectionTitle(stringResource(R.string.module_appearance)) }
         item {
             ModuleAppearanceCard(
@@ -107,6 +110,113 @@ fun SettingsPage(
         item { SectionTitle(stringResource(R.string.saying_settings)) }
         item { SayingSettingsCard(activity) }
     }
+}
+
+/**
+ * 「配置」栏目：模块级开关。
+ *
+ * 1）设置页软件入口——hook HyperOS 设置首页，在 Header 列表里插入一条指向本模块的入口，
+ *    可选插入位置与「是否与相邻项同组」（同组=落在上一项那张卡片里）；
+ * 2）隐藏桌面图标——桌面图标由 MainActivityAlias 这个 activity-alias 承载，禁用别名即可隐藏，
+ *    MainActivity 仍保留 LSPosed 管理器入口，隐藏后依旧能进模块界面。
+ */
+@Composable
+private fun ModuleConfigCard(activity: MainActivity) {
+    val config = activity.config
+    val positions = listOf(
+        BackgroundContract.SETTINGS_ENTRY_POSITION_TOP,
+        BackgroundContract.SETTINGS_ENTRY_POSITION_MIDDLE,
+        BackgroundContract.SETTINGS_ENTRY_POSITION_BOTTOM,
+    )
+    var settingsEntry by remember {
+        mutableStateOf(config.getBoolean(BackgroundContract.UI_SETTINGS_ENTRY_ENABLED, true))
+    }
+    var settingsEntrySameGroup by remember {
+        mutableStateOf(config.getBoolean(BackgroundContract.UI_SETTINGS_ENTRY_SAME_GROUP, true))
+    }
+    var settingsEntryPosition by remember {
+        mutableStateOf(
+            config.getString(BackgroundContract.UI_SETTINGS_ENTRY_POSITION, positions.first())
+                ?: positions.first(),
+        )
+    }
+    // 状态以组件实际值为准：用户可能在系统里改过，或卸载重装后回到默认。
+    var hideDesktopIcon by remember { mutableStateOf(!DesktopIcon.isVisible(activity)) }
+
+    UiCard(activity, Modifier.fillMaxWidth()) {
+        Column {
+            SwitchPreference(
+                title = stringResource(R.string.settings_entry),
+                summary = stringResource(R.string.settings_entry_summary),
+                checked = settingsEntry,
+                onCheckedChange = {
+                    settingsEntry = it
+                    config.edit().putBoolean(BackgroundContract.UI_SETTINGS_ENTRY_ENABLED, it).apply()
+                    toast(activity, R.string.settings_entry_hint)
+                },
+            )
+            AnimatedVisibility(
+                visible = settingsEntry,
+                enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(220)),
+                exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(180)),
+            ) {
+                SwitchPreference(
+                    title = stringResource(R.string.settings_entry_same_group),
+                    summary = stringResource(R.string.settings_entry_same_group_summary),
+                    checked = settingsEntrySameGroup,
+                    onCheckedChange = {
+                        settingsEntrySameGroup = it
+                        config.edit()
+                            .putBoolean(BackgroundContract.UI_SETTINGS_ENTRY_SAME_GROUP, it).apply()
+                        toast(activity, R.string.settings_entry_hint)
+                    },
+                )
+            }
+            AnimatedVisibility(
+                visible = settingsEntry,
+                enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(220)),
+                exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(180)),
+            ) {
+                OverlayDropdownPreference(
+                    title = stringResource(R.string.settings_entry_position),
+                    items = listOf(
+                        stringResource(R.string.settings_entry_position_top),
+                        stringResource(R.string.settings_entry_position_middle),
+                        stringResource(R.string.settings_entry_position_bottom),
+                    ),
+                    selectedIndex = positions.indexOf(settingsEntryPosition).coerceAtLeast(0),
+                    onSelectedIndexChange = { index ->
+                        settingsEntryPosition = positions[index]
+                        config.edit()
+                            .putString(BackgroundContract.UI_SETTINGS_ENTRY_POSITION, positions[index])
+                            .apply()
+                        toast(activity, R.string.settings_entry_hint)
+                    },
+                )
+            }
+            SwitchPreference(
+                title = stringResource(R.string.hide_desktop_icon),
+                summary = stringResource(R.string.hide_desktop_icon_summary),
+                checked = hideDesktopIcon,
+                onCheckedChange = { hide ->
+                    if (DesktopIcon.setVisible(activity, !hide)) {
+                        hideDesktopIcon = hide
+                        config.edit().putBoolean(BackgroundContract.UI_HIDE_DESKTOP_ICON, hide).apply()
+                        toast(
+                            activity,
+                            if (hide) R.string.hide_desktop_icon_done else R.string.hide_desktop_icon_visible,
+                        )
+                    } else {
+                        toast(activity, R.string.hide_desktop_icon_failed)
+                    }
+                },
+            )
+        }
+    }
+}
+
+private fun toast(activity: MainActivity, resId: Int) {
+    android.widget.Toast.makeText(activity, resId, android.widget.Toast.LENGTH_SHORT).show()
 }
 
 @Composable
@@ -207,6 +317,7 @@ private fun ModuleAppearanceCard(
                 value = cardOpacity,
                 range = 0f..100f,
                 suffix = "%",
+                defaultValue = 100f,
                 onValueChange = { cardOpacity = it },
                 onValueChangeFinished = { activity.updateCardOpacity(it / 100f) },
             )
@@ -352,12 +463,13 @@ private fun InputField(label: String, value: String, onChange: (String) -> Unit)
 @Composable
 fun RestartScopesDialog(
     activity: MainActivity,
+    targets: List<String>,
     show: Boolean,
     onDismissRequest: () -> Unit,
 ) {
     WindowDialog(
         title = stringResource(R.string.restart_scope),
-        summary = stringResource(R.string.restart_scope_confirm),
+        summary = stringResource(R.string.restart_scope_confirm, targets.size),
         show = show,
         onDismissRequest = onDismissRequest,
     ) {
@@ -377,20 +489,23 @@ fun RestartScopesDialog(
                 colors = ButtonDefaults.textButtonColorsPrimary(),
                 onClick = {
                     dismiss?.invoke()
-                    restartScopes(activity)
+                    restartScopes(activity, targets)
                 },
             )
         }
     }
 }
 
-private fun restartScopes(activity: MainActivity) {
+private fun restartScopes(activity: MainActivity, packages: List<String>) {
     android.widget.Toast.makeText(activity, R.string.root_requested, android.widget.Toast.LENGTH_SHORT).show()
     thread {
-        val success = SCOPE_PACKAGES.map { runCatching { RootShell.run("am force-stop $it").success }.getOrDefault(false) }.all { it }
+        val success = packages.map { runCatching { RootShell.run("am force-stop $it").success }.getOrDefault(false) }.all { it }
         // com.android.phone 是常驻电话进程，am force-stop 有时无法彻底结束，
         // 追加一次按进程名 kill 兜底，确保它被真正重启以重新加载配置。
-        runCatching { RootShell.run("pkill -9 -f ${BackgroundContract.PACKAGE_PHONE}") }
+        // 只在电话进程确实在重启名单里时才兜底，避免杀掉用户已关闭的作用域。
+        if (BackgroundContract.PACKAGE_PHONE in packages) {
+            runCatching { RootShell.run("pkill -9 -f ${BackgroundContract.PACKAGE_PHONE}") }
+        }
         activity.runOnUiThread {
             android.widget.Toast.makeText(
                 activity,
@@ -400,18 +515,6 @@ private fun restartScopes(activity: MainActivity) {
         }
     }
 }
-
-private val SCOPE_PACKAGES = listOf(
-    BackgroundContract.PACKAGE_SETTINGS,
-    BackgroundContract.PACKAGE_MILINK,
-    BackgroundContract.PACKAGE_PHONE,
-    BackgroundContract.PACKAGE_ACCOUNT,
-    BackgroundContract.PACKAGE_THEME_MANAGER,
-    BackgroundContract.PACKAGE_HOME,
-    BackgroundContract.PACKAGE_SECURITY_CENTER,
-    BackgroundContract.PACKAGE_POWER_KEEPER,
-    BackgroundContract.PACKAGE_MI_SETTINGS,
-)
 
 private const val DEFAULT_API = "https://uapis.cn/api/v1/saying"
 private const val DEFAULT_KEY = "text"

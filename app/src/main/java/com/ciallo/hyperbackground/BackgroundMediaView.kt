@@ -7,7 +7,6 @@ import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
-import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.RenderEffect
 import android.graphics.Shader
@@ -24,8 +23,10 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
+import com.ciallo.hyperbackground.util.FirstFrameCallback
 import java.io.IOException
 import java.util.concurrent.Callable
+import java.util.concurrent.Future
 
 internal class BackgroundMediaView(
     context: Context,
@@ -38,16 +39,38 @@ internal class BackgroundMediaView(
     private var mediaPlayer: MediaPlayer? = null
     private var dataDescriptor: ParcelFileDescriptor? = null
     private var imageLayoutListener: View.OnLayoutChangeListener? = null
+    private var lastImageDisplayBounds: RectF? = null
+    private var lastImageDisplayScale = 1f
     private var videoWidth = 0
     private var videoHeight = 0
     private var hostResumed = true
     private var disposed = false
-
-    // 顶部圆角半径（px，>0 才裁切）。用自绘 clipPath 而非 setClipToOutline，后者对内部 MATRIX 绘制的
-    // ImageView 内容裁切不稳定，直接在 dispatchDraw 裁路径可确保对任意子内容一定生效。
-    private var topCornerRadius = 0f
-    private val clipPath = Path()
-    private val clipRect = RectF()
+    val isDisposed: Boolean get() = disposed
+    private var imageTask: Future<*>? = null
+    private var videoFrameAvailable = false
+    private var videoBrightnessMask: View? = null
+    private val firstFrame = FirstFrameCallback(this)
+    val hasRenderedFrame: Boolean get() = firstFrame.isReady
+    var onFirstFrame: (() -> Unit)?
+        get() = firstFrame.onReady
+        set(value) { firstFrame.onReady = value }
+    var isReady = false
+        private set
+    var loadFailed = false
+        private set
+    var onImageDisplayBoundsChanged: ((RectF, Float) -> Unit)? = null
+        set(value) {
+            field = value
+            val bounds = lastImageDisplayBounds
+            if (value != null && bounds != null && !disposed) {
+                value(RectF(bounds), lastImageDisplayScale)
+            }
+        }
+    var onReady: (() -> Unit)? = null
+        set(value) {
+            field = value
+            if (isReady && !disposed) value?.invoke()
+        }
 
     init {
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO)
@@ -95,6 +118,12 @@ internal class BackgroundMediaView(
 
     fun dispose() {
         disposed = true
+        onReady = null
+        onImageDisplayBoundsChanged = null
+        lastImageDisplayBounds = null
+        firstFrame.dispose()
+        imageTask?.cancel(true)
+        imageTask = null
         (imageDrawable as? AnimatedImageDrawable)?.stop()
         releasePlayer()
         textureView?.setSurfaceTextureListener(null)
@@ -105,57 +134,57 @@ internal class BackgroundMediaView(
         removeAllViews()
     }
 
-    // 设置圆角半径（px）：四角同半径圆角裁切。
-    fun setTopCornerRadius(radiusPx: Float) {
-        topCornerRadius = radiusPx.coerceAtLeast(0f)
-        setWillNotDraw(false)
-        invalidate()
-    }
-
-    override fun dispatchDraw(canvas: Canvas) {
-        if (topCornerRadius <= 0f) {
-            super.dispatchDraw(canvas)
-            return
-        }
-        val w = width
-        val h = height
-        if (w <= 0 || h <= 0) {
-            super.dispatchDraw(canvas)
-            return
-        }
-        // 四角同半径圆角。半径不超过宽/高一半，避免面板从底部往上弹出、动画中途高度较小时圆角画不全。
-        val r = minOf(topCornerRadius, minOf(w, h) / 2f)
-        clipPath.reset()
-        clipRect.set(0f, 0f, w.toFloat(), h.toFloat())
-        clipPath.addRoundRect(clipRect, r, r, Path.Direction.CW)
-        val save = canvas.save()
-        canvas.clipPath(clipPath)
-        super.dispatchDraw(canvas)
-        canvas.restoreToCount(save)
-    }
-
     private fun createImageView() {
-        val view = ImageView(context)
+        val view = object : ImageView(context) {
+            override fun onDraw(canvas: Canvas) {
+                super.onDraw(canvas)
+                if (drawable != null && !loadFailed) firstFrame.afterDraw()
+            }
+        }
         imageView = view
         view.adjustViewBounds = false
-        val decoderSource = ImageDecoder.createSource(Callable {
-            AssetFileDescriptor(source.openFile(), 0, AssetFileDescriptor.UNKNOWN_LENGTH)
-        })
-        val drawable = ImageDecoder.decodeDrawable(decoderSource)
-        imageDrawable = drawable
-        view.setImageDrawable(drawable)
-        applyImageBrightness()
         addView(
             view, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
         )
-        applyImageScale()
-        if (drawable is AnimatedImageDrawable) {
-            drawable.setRepeatCount(AnimatedImageDrawable.REPEAT_INFINITE)
-            drawable.start()
+        val mediaKey = "remote:${source.slot}:${source.random}:${source.mime}:${source.size}:${source.modified}"
+        val cached = BackgroundImageLoader.cached(resources, mediaKey, source.zoom)
+        if (cached != null) {
+            bindImage(cached)
+            return
         }
+        imageTask = BackgroundImageLoader.load(resources, mediaKey, source.zoom, source = {
+            ImageDecoder.createSource(Callable {
+                AssetFileDescriptor(source.openFile(), 0, AssetFileDescriptor.UNKNOWN_LENGTH)
+            })
+        }) { result ->
+            post {
+                if (!disposed) result.fold(::bindImage) {
+                    loadFailed = true
+                    Log.e(TAG, "Cannot decode background", it)
+                }
+            }
+        }
+    }
+
+    private fun bindImage(drawable: Drawable) {
+        imageDrawable = drawable
+        imageView?.setImageDrawable(drawable)
+        applyImageBrightness()
+        applyImageScale()
+        (drawable as? AnimatedImageDrawable)?.let {
+            it.repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+            if (hostResumed) it.start()
+        }
+        markReady()
+    }
+
+    private fun markReady() {
+        if (disposed || isReady || loadFailed) return
+        isReady = true
+        onReady?.invoke()
     }
 
     // 背景亮度：对图片用 ColorMatrix 缩放 RGB 通道实现（100=原图，<100 变暗，>100 提亮），
@@ -228,6 +257,7 @@ internal class BackgroundMediaView(
             matrix.setScale(scale, scale)
             matrix.postTranslate(Math.round(dx).toFloat(), Math.round(dy).toFloat())
             view.imageMatrix = matrix
+            publishImageDisplayBounds(matrix, dw, dh, zoom)
             return
         }
 
@@ -246,6 +276,16 @@ internal class BackgroundMediaView(
         matrix.setScale(scale, scale)
         matrix.postTranslate(Math.round(dx).toFloat(), Math.round(dy).toFloat())
         view.imageMatrix = matrix
+        publishImageDisplayBounds(matrix, dw, dh, zoom)
+    }
+
+    private fun publishImageDisplayBounds(matrix: Matrix, width: Int, height: Int, zoom: Float) {
+        if (BackgroundContract.CONTACTS_DIALPAD != source.slot) return
+        val bounds = RectF(0f, 0f, width.toFloat(), height.toFloat())
+        matrix.mapRect(bounds)
+        lastImageDisplayBounds = RectF(bounds)
+        lastImageDisplayScale = zoom
+        onImageDisplayBoundsChanged?.invoke(RectF(bounds), zoom)
     }
 
     private fun createVideoView() {
@@ -277,6 +317,9 @@ internal class BackgroundMediaView(
             overlayAlpha = minOf(0.5f, b / 100f - 1f) // 0..0.5（越亮越白，封顶）
         }
         val mask = View(context)
+        videoBrightnessMask = mask
+        // An empty TextureView must not darken the system background while video is preparing.
+        mask.visibility = View.INVISIBLE
         mask.setBackgroundColor(overlayColor)
         mask.alpha = overlayAlpha
         mask.isClickable = false
@@ -303,7 +346,12 @@ internal class BackgroundMediaView(
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-        // No-op.
+        if (disposed || loadFailed) return
+        firstFrame.afterDraw()
+        if (videoFrameAvailable) return
+        videoFrameAvailable = true
+        videoBrightnessMask?.visibility = View.VISIBLE
+        post { markReady() }
     }
 
     private fun startPlayer(surfaceTexture: SurfaceTexture) {
@@ -333,12 +381,14 @@ internal class BackgroundMediaView(
                 if (hostResumed) mp.start()
             }
             player.setOnErrorListener { _, what, extra ->
+                loadFailed = true
                 Log.e(TAG, "Video background failed: $what/$extra")
                 closeDescriptor()
                 true
             }
             player.prepareAsync()
         } catch (error: Throwable) {
+            loadFailed = true
             Log.e(TAG, "Cannot start video background", error)
             releasePlayer()
         }

@@ -15,11 +15,12 @@ object BackgroundContract {
     const val PACKAGE_POWER_KEEPER = "com.miui.powerkeeper"
     const val PACKAGE_MI_SETTINGS = "com.xiaomi.misettings"
     const val PACKAGE_CONTACTS = "com.android.contacts"
+    const val PACKAGE_MMS = "com.android.mms"
 
     private val SUPPORTED_PACKAGES = arrayOf(
         PACKAGE_SETTINGS, PACKAGE_MILINK, PACKAGE_PHONE, PACKAGE_ACCOUNT,
         PACKAGE_THEME_MANAGER, PACKAGE_HOME, PACKAGE_SECURITY_CENTER,
-        PACKAGE_POWER_KEEPER, PACKAGE_MI_SETTINGS, PACKAGE_CONTACTS,
+        PACKAGE_POWER_KEEPER, PACKAGE_MI_SETTINGS, PACKAGE_CONTACTS, PACKAGE_MMS,
     )
 
     const val HOME = "home"
@@ -27,6 +28,10 @@ object BackgroundContract {
     const val GLOBAL = "global"
     // 通讯录与拨号（com.android.contacts）主界面背景通道，与 home/device/global 同构。
     const val CONTACTS = "contacts"
+    // 短信主页（com.android.mms）：会话列表、验证码/推广等分类列表、短信内部设置页共用此通道。
+    const val MMS = "mms"
+    // 短信聊天页：会话详情与新建短信页独立通道。
+    const val MMS_CHAT = "mms_chat"
     // 拨号盘独立背景通道：与 contacts 同构的一条媒体通道，但只注入到拨号盘键盘容器（DialpadLayout）内，
     // 与 contacts 整页背景叠加共存——整页背景照旧，拨号盘弹出时在键盘区额外叠这张图。
     const val CONTACTS_DIALPAD = "contacts_dialpad"
@@ -51,7 +56,7 @@ object BackgroundContract {
     const val CONTACTS_SURFACE_ADAPT = "contacts_surface_adapt"
     // 拨号盘键盘面板不透明度（0-100，默认 60），仅在适配开关开启时生效。
     const val CONTACTS_DIALPAD_OPACITY = "contacts_dialpad_opacity"
-    // 拨号盘背景模式：默认（用系统原生拨号盘底、仅按上面的不透明度设 alpha）/ 自定义（叠加用户选的图）。
+    // 默认模式调整原生底色并模糊后方内容；自定义模式模糊所选图片。两者共用该槽位的模糊参数。
     const val CONTACTS_DIALPAD_BG_MODE = "contacts_dialpad_bg_mode"
     const val CONTACTS_DIALPAD_BG_DEFAULT = 0
     const val CONTACTS_DIALPAD_BG_CUSTOM = 1
@@ -89,6 +94,23 @@ object BackgroundContract {
     // 清除设置主页顶栏遮罩。只作用于 MiuiSettings 首页；开启时首页清除优先，
     // 其它设置二级页仍可继续使用全局顶栏模糊。
     const val UI_TOP_CLEAR_ENABLED = "ui_top_clear_enabled"
+    // 顶栏右侧按钮背景常驻。MIUIX 默认只在列表下拉、顶栏浮层遮罩出现时才把按钮切到
+    // 「浮动」态（胶囊材质底）。开启后把 ActionBarContainer 的按钮浮动状态钉在 1，
+    // 与顶栏模糊/清除互不影响。
+    const val UI_TOP_BUTTON_BACKGROUND_ENABLED = "ui_top_button_background_enabled"
+    // 「配置」栏目 - 设置页软件入口：hook HyperOS 设置首页（MiuiSettings.updateHeaderList）插入一条
+    // 指向模块 MainActivity 的 Header。位置决定锚点条目，同组决定是否继承相邻条目的 groupId（同一张卡片）。
+    const val UI_SETTINGS_ENTRY_ENABLED = "ui_settings_entry_enabled"
+    const val UI_SETTINGS_ENTRY_POSITION = "ui_settings_entry_position"
+    const val UI_SETTINGS_ENTRY_SAME_GROUP = "ui_settings_entry_same_group"
+    const val SETTINGS_ENTRY_POSITION_TOP = "top"
+    const val SETTINGS_ENTRY_POSITION_MIDDLE = "middle"
+    const val SETTINGS_ENTRY_POSITION_BOTTOM = "bottom"
+    // 「配置」栏目 - 隐藏桌面图标：桌面图标由 MainActivityAlias 这个 activity-alias 承载，
+    // 禁用别名即隐藏图标（MainActivity 仍保留 LSPosed 管理器入口）。仅记录用户选择，实际状态以组件为准。
+    const val UI_HIDE_DESKTOP_ICON = "ui_hide_desktop_icon"
+    /** 承载 LAUNCHER 入口的 activity-alias 组件名后缀，与 AndroidManifest 保持一致。 */
+    const val ACTIVITY_ALIAS_SUFFIX = ".ui.MainActivityAlias"
     const val UI_SAYING_ENABLED = "ui_saying_enabled"
     const val UI_SAYING_API = "ui_saying_api"
     const val UI_SAYING_KEY = "ui_saying_key"
@@ -140,7 +162,7 @@ object BackgroundContract {
 
     fun remoteMediaName(slot: String, random: Boolean = false): String {
         if (slot != HOME && slot != DEVICE && slot != GLOBAL &&
-            slot != CONTACTS && slot != CONTACTS_DIALPAD
+            slot != CONTACTS && slot != CONTACTS_DIALPAD && slot != MMS && slot != MMS_CHAT
         ) {
             throw IllegalArgumentException("Unknown background slot: $slot")
         }

@@ -30,7 +30,6 @@ import com.ciallo.hyperbackground.ui.MainActivity
 import com.ciallo.hyperbackground.ui.components.SectionTitle
 import com.ciallo.hyperbackground.ui.components.BackgroundPickerPreference
 import com.ciallo.hyperbackground.ui.components.SliderPreference
-import com.ciallo.hyperbackground.ui.components.SliderWithInputPreference
 import com.ciallo.hyperbackground.ui.components.UiCard
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
@@ -61,19 +60,34 @@ fun BackgroundDetailPage(
         item { SectionTitle(stringResource(R.string.scope)) }
         item {
             UiCard(activity, Modifier.fillMaxWidth()) {
-                BackgroundPickerPreference(activity = activity, slot = slot)
-                // 通讯录：把「颜色模式」并入「背景」卡，作为「设置背景」下方的同卡条目（无独立分组标题）。
-                if (slot == BackgroundContract.CONTACTS) {
-                    ContactsThemePreference(activity)
+                if (slot == BackgroundContract.MMS) {
+                    // 短信大通道：主页背景（列表/验证码/设置页）与聊天背景（会话/新建页）两个二级槽位；
+                    // 聊天槽位未单独设图时注入侧自动回退主页图。两个 picker 隐藏自带导出行，统一用下方下拉导出。
+                    BackgroundPickerPreference(
+                        activity = activity,
+                        slot = BackgroundContract.MMS,
+                        title = stringResource(R.string.mms_set_home_bg),
+                        showExport = false,
+                    )
+                    BackgroundPickerPreference(
+                        activity = activity,
+                        slot = BackgroundContract.MMS_CHAT,
+                        title = stringResource(R.string.mms_set_chat_bg),
+                        showExport = false,
+                    )
+                    MmsExportDropdown(activity)
+                } else {
+                    BackgroundPickerPreference(activity = activity, slot = slot)
+                    // 通讯录：把「颜色模式」并入「背景」卡，作为「设置背景」下方的同卡条目（无独立分组标题）。
+                    if (slot == BackgroundContract.CONTACTS) {
+                        ContactsThemePreference(activity)
+                    }
                 }
             }
         }
         if (slot == BackgroundContract.HOME) {
             item { SectionTitle(stringResource(R.string.home_scale_title)) }
             item { HomeScaleCard(activity) }
-            item { SectionTitle(stringResource(R.string.blur)) }
-            item { TopBlurCard(activity) }
-            item { TopClearCard(activity) }
         }
         if (slot == BackgroundContract.CONTACTS) {
             item { SectionTitle(stringResource(R.string.contacts_surface_title)) }
@@ -122,99 +136,6 @@ private fun UninstallNoticeCard(activity: MainActivity) {
     }
 }
 
-@Composable
-private fun TopBlurCard(activity: MainActivity) {
-    val config = activity.config
-    var enabled by remember {
-        mutableStateOf(config.getBoolean(BackgroundContract.UI_TOP_BLUR_ENABLED, true))
-    }
-    var strength by remember {
-        mutableFloatStateOf(
-            config.getInt(BackgroundContract.UI_TOP_BLUR_STRENGTH, 10)
-                .coerceIn(0, 100)
-                .toFloat(),
-        )
-    }
-    var opacity by remember {
-        mutableFloatStateOf(
-            config.getInt(BackgroundContract.UI_TOP_BLUR_OPACITY, 100)
-                .coerceIn(0, 100)
-                .toFloat(),
-        )
-    }
-    UiCard(activity, Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(vertical = 8.dp)) {
-            SwitchPreference(
-                title = stringResource(R.string.top_blur),
-                summary = stringResource(R.string.top_blur_summary),
-                checked = enabled,
-                onCheckedChange = {
-                    enabled = it
-                    config.edit().putBoolean(BackgroundContract.UI_TOP_BLUR_ENABLED, it).apply()
-                },
-            )
-            AnimatedVisibility(
-                visible = enabled,
-                enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(220)),
-                exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(180)),
-            ) {
-                Column(Modifier.padding(bottom = 8.dp)) {
-                    SliderPreference(
-                        label = stringResource(R.string.blur_strength),
-                        value = strength,
-                        range = 0f..100f,
-                        suffix = "%",
-                        onValueChange = { strength = it },
-                        onValueChangeFinished = {
-                            config.edit()
-                                .putInt(BackgroundContract.UI_TOP_BLUR_STRENGTH, it.toInt())
-                                .apply()
-                        },
-                    )
-                    SliderPreference(
-                        label = stringResource(R.string.top_blur_opacity),
-                        value = opacity,
-                        range = 0f..100f,
-                        suffix = "%",
-                        onValueChange = { opacity = it },
-                        onValueChangeFinished = {
-                            config.edit()
-                                .putInt(BackgroundContract.UI_TOP_BLUR_OPACITY, it.toInt())
-                                .apply()
-                        },
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * 清除设置各级页面顶栏遮罩。开启后覆盖顶部模糊，将首页与二级页顶栏统一变透明。
- */
-@Composable
-private fun TopClearCard(activity: MainActivity) {
-    val config = activity.config
-    var enabled by remember {
-        mutableStateOf(config.getBoolean(BackgroundContract.UI_TOP_CLEAR_ENABLED, false))
-    }
-    UiCard(activity, Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(vertical = 8.dp)) {
-            SwitchPreference(
-                title = stringResource(R.string.top_clear),
-                summary = stringResource(R.string.top_clear_summary),
-                checked = enabled,
-                onCheckedChange = {
-                    enabled = it
-                    config.edit()
-                        .putBoolean(BackgroundContract.UI_TOP_CLEAR_ENABLED, it)
-                        .apply()
-                },
-            )
-        }
-    }
-}
-
 /**
  * 设置主页背景缩放与定位。100/50/50 对应 CENTER_CROP 默认观感，参数只写入 home 通道。
  */
@@ -254,26 +175,29 @@ private fun HomeScaleCard(activity: MainActivity) {
                 range = BackgroundContract.CONTACTS_DIALPAD_ZOOM_MIN.toFloat()..
                     BackgroundContract.CONTACTS_DIALPAD_ZOOM_MAX.toFloat(),
                 suffix = "%",
+                defaultValue = BackgroundContract.CONTACTS_DIALPAD_ZOOM_DEFAULT.toFloat(),
                 onValueChange = { zoom = it },
                 onValueChangeFinished = {
                     config.edit().putInt(BackgroundContract.HOME_ZOOM, zoom.toInt()).apply()
                 },
             )
-            SliderWithInputPreference(
+            SliderPreference(
                 label = stringResource(R.string.home_focus_x),
                 value = focusX,
                 range = 0f..100f,
                 suffix = "%",
+                defaultValue = 50f,
                 onValueChange = { focusX = it },
                 onValueChangeFinished = {
                     config.edit().putInt(BackgroundContract.HOME_FOCUS_X, focusX.toInt()).apply()
                 },
             )
-            SliderWithInputPreference(
+            SliderPreference(
                 label = stringResource(R.string.home_focus_y),
                 value = focusY,
                 range = 0f..100f,
                 suffix = "%",
+                defaultValue = 50f,
                 onValueChange = { focusY = it },
                 onValueChangeFinished = {
                     config.edit().putInt(BackgroundContract.HOME_FOCUS_Y, focusY.toInt()).apply()
@@ -286,6 +210,12 @@ private fun HomeScaleCard(activity: MainActivity) {
 @Composable
 private fun ContactsSurfaceCard(activity: MainActivity, revision: Int) {
     val config = activity.config
+    val blurKey = BackgroundContract.BLUR_ENABLED_PREFIX + BackgroundContract.CONTACTS_DIALPAD
+    val radiusKey = BackgroundContract.BLUR_RADIUS_PREFIX + BackgroundContract.CONTACTS_DIALPAD
+    var blur by remember(revision) { mutableStateOf(config.getBoolean(blurKey, false)) }
+    var blurRadius by remember(revision) {
+        mutableFloatStateOf(config.getInt(radiusKey, 20).coerceIn(0, 80).toFloat())
+    }
     var enabled by remember {
         mutableStateOf(config.getBoolean(BackgroundContract.CONTACTS_SURFACE_ADAPT, true))
     }
@@ -348,6 +278,7 @@ private fun ContactsSurfaceCard(activity: MainActivity, revision: Int) {
                         value = opacity,
                         range = 0f..100f,
                         suffix = "%",
+                        defaultValue = 60f,
                         onValueChange = { opacity = it },
                         onValueChangeFinished = {
                             config.edit()
@@ -355,6 +286,31 @@ private fun ContactsSurfaceCard(activity: MainActivity, revision: Int) {
                                 .apply()
                         },
                     )
+                    SwitchPreference(
+                        title = stringResource(R.string.contacts_dialpad_blur),
+                        summary = stringResource(R.string.contacts_dialpad_blur_summary),
+                        checked = blur,
+                        onCheckedChange = {
+                            blur = it
+                            config.edit().putBoolean(blurKey, it).apply()
+                        },
+                    )
+                    AnimatedVisibility(
+                        visible = blur,
+                        enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(220)),
+                        exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(180)),
+                    ) {
+                        SliderPreference(
+                            label = stringResource(R.string.blur_strength),
+                            value = blurRadius,
+                            range = 0f..80f,
+                            defaultValue = 20f,
+                            onValueChange = { blurRadius = it },
+                            onValueChangeFinished = {
+                                config.edit().putInt(radiusKey, it.toInt()).apply()
+                            },
+                        )
+                    }
                 }
             }
             // 「拨号盘背景 默认/自定义」并入本卡：选「自定义」展开与其它通道一致的选图 + 透明度 + 清除。
@@ -374,7 +330,11 @@ private fun ContactsSurfaceCard(activity: MainActivity, revision: Int) {
             ) {
                 Column(Modifier.padding(bottom = 8.dp)) {
                     key(revision) {
-                        BackgroundPickerPreference(activity = activity, slot = BackgroundContract.CONTACTS_DIALPAD)
+                        BackgroundPickerPreference(
+                            activity = activity,
+                            slot = BackgroundContract.CONTACTS_DIALPAD,
+                            showBlurControls = false,
+                        )
                     }
                     // 缩放大小：等比缩放，100% 为贴满基准，可放大到 200% 或缩小到 1%。
                     SliderPreference(
@@ -383,24 +343,24 @@ private fun ContactsSurfaceCard(activity: MainActivity, revision: Int) {
                         range = BackgroundContract.CONTACTS_DIALPAD_ZOOM_MIN.toFloat()..
                             BackgroundContract.CONTACTS_DIALPAD_ZOOM_MAX.toFloat(),
                         suffix = "%",
+                        defaultValue = BackgroundContract.CONTACTS_DIALPAD_ZOOM_DEFAULT.toFloat(),
                         onValueChange = { zoom = it },
                         onValueChangeFinished = {
-                            config.edit()
-                                .putInt(BackgroundContract.CONTACTS_DIALPAD_ZOOM, zoom.toInt())
+                            config.edit().putInt(BackgroundContract.CONTACTS_DIALPAD_ZOOM, zoom.toInt())
                                 .apply()
                         },
                     )
                     // 纵向位置（屏幕坐标系）：0 图顶部对齐、50 居中、100 底部对齐，控制透过拨号盘看到图的哪一段。
                     // 横向恒居中铺满（以屏幕宽为基准），故不再提供横向位置。滑块 + 数值输入框可精确调节。
-                    SliderWithInputPreference(
+                    SliderPreference(
                         label = stringResource(R.string.contacts_dialpad_focus_y),
                         value = focusY,
                         range = 0f..100f,
                         suffix = "%",
+                        defaultValue = 50f,
                         onValueChange = { focusY = it },
                         onValueChangeFinished = {
-                            config.edit()
-                                .putInt(BackgroundContract.CONTACTS_DIALPAD_FOCUS_Y, focusY.toInt())
+                            config.edit().putInt(BackgroundContract.CONTACTS_DIALPAD_FOCUS_Y, focusY.toInt())
                                 .apply()
                         },
                     )
@@ -408,6 +368,30 @@ private fun ContactsSurfaceCard(activity: MainActivity, revision: Int) {
             }
         }
     }
+}
+
+/**
+ * 短信通道的「导出当前图片」下拉：选择导出主页背景图或聊天背景图（随机图优先）。
+ * 选中即导出；该槽位无文件时由 exportBackground 统一提示。
+ */
+@Composable
+private fun MmsExportDropdown(activity: MainActivity) {
+    val options = listOf(
+        stringResource(R.string.mms_export_home),
+        stringResource(R.string.mms_export_chat),
+    )
+    var selected by remember { mutableIntStateOf(0) }
+    OverlayDropdownPreference(
+        title = stringResource(R.string.export_background),
+        items = options,
+        selectedIndex = selected.coerceIn(options.indices),
+        onSelectedIndexChange = {
+            selected = it
+            activity.exportBackground(
+                if (it == 0) BackgroundContract.MMS else BackgroundContract.MMS_CHAT,
+            )
+        },
+    )
 }
 
 /**

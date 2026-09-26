@@ -2,6 +2,7 @@ package com.ciallo.hyperbackground
 
 import android.app.Activity
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.res.TypedArray
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -16,7 +17,21 @@ import android.view.ViewTreeObserver
 import android.view.Window
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
+import com.ciallo.hyperbackground.appearance.ComponentKeys
+import com.ciallo.hyperbackground.appearance.KEY_APP_COMPONENT_DISABLED
+import com.ciallo.hyperbackground.appearance.KEY_APP_SCOPE_DISABLED
+import com.ciallo.hyperbackground.appearance.KEY_COMPONENT_GLOBAL_WALLPAPER
+import com.ciallo.hyperbackground.appearance.KEY_COMPONENT_LAYOUT_CLEANUP
+import com.ciallo.hyperbackground.appearance.SETTINGS_APPEARANCE_PREFERENCES
+import com.ciallo.hyperbackground.dialpad.DialpadBackgroundController
+import com.ciallo.hyperbackground.dialpad.DialpadBackdropView
+import com.ciallo.hyperbackground.util.callMethod
+import com.ciallo.hyperbackground.util.getAdditionalInstanceField
+import com.ciallo.hyperbackground.util.getObjectField
+import com.ciallo.hyperbackground.util.removeAdditionalInstanceField
+import com.ciallo.hyperbackground.util.setAdditionalInstanceField
 import java.util.ArrayList
 import java.util.IdentityHashMap
 
@@ -28,21 +43,88 @@ object BackgroundApplier {
     private val GLOBAL_SESSION = FIELD_PREFIX + "global.session"
     private val DEVICE_SESSION = FIELD_PREFIX + "device.session"
     private val CONTACTS_SESSION = FIELD_PREFIX + "contacts.session"
-    // 拨号盘独立背景层的会话，存到 DialpadLayout 实例上（拨号盘可被反复 inflate/复用）。
-    private val DIALPAD_SESSION = FIELD_PREFIX + "dialpad.session"
+    private val MMS_SESSION = FIELD_PREFIX + "mms.session"
+    private val MMS_CHAT_SESSION = FIELD_PREFIX + "mms.chat.session"
     private val CONTACTS_RESCAN = FIELD_PREFIX + "contacts.rescan"
     private val CONTACTS_ADAPT_AT = FIELD_PREFIX + "contacts.adapt.at"
-    // 清除列表不透明中性色背景前，把原背景存到该 View 的 Xposed 附加字段，便于开关关闭时还原。
+    private val CONTACTS_ADAPT_DIRTY = FIELD_PREFIX + "contacts.adapt.dirty"
+    private val MMS_RESCAN = FIELD_PREFIX + "mms.rescan"
+    private val MMS_ADAPT_AT = FIELD_PREFIX + "mms.adapt.at"
+    private val MMS_ADAPT_DIRTY = FIELD_PREFIX + "mms.adapt.dirty"
+    // 联系人详情页容器背景的原值。
     private val CONTACTS_BG_SAVED = FIELD_PREFIX + "contacts.bg.saved"
-    // 自定义模式把 dialer_background_view 的原生 9-patch 底换成透明前，先存原背景到该字段供切回默认时还原。
-    private val DIALPAD_BGVIEW_SAVED = FIELD_PREFIX + "dialpad.bgview.saved"
-    // 默认模式下承载面板底、可整体调 alpha 的置底纯背景 view（作为 dialpad_container 的第一个子 view）。
-    private val DIALPAD_PANEL_ALPHA_VIEW = FIELD_PREFIX + "dialpad.panel.alpha.view"
     // 缓存联系人进程内的资源 id（进程内固定），避免每次布局回调都走 getIdentifier 慢查询。-1=未解析。
     private var contactsBgViewId = -1
     private val DEVICE_ACTIVE = FIELD_PREFIX + "device.active"
     private val ORIGINAL_TEXT_COLOR = FIELD_PREFIX + "original.text.color"
     private val GLOBAL_DIAGNOSTIC = FIELD_PREFIX + "global.diagnostic"
+
+    /**
+     * 「全局壁纸」通道的开关快照：组件作用域的总开关 + 软件作用域的整包/按组件禁用集合。
+     * 读的是 settings_appearance 的远端 SharedPreferences，跨进程读取开销大，所以进程内缓存，
+     * 并挂变更监听刷新（与动态材质同一套键）。
+     */
+    private data class GlobalWallpaperConfig(
+        val enabled: Boolean = true,
+        val cleanupEnabled: Boolean = false,
+        val disabledPackages: Set<String> = emptySet(),
+        val disabledComponents: Set<String> = emptySet(),
+    )
+
+    @Volatile
+    private var globalWallpaperCache: GlobalWallpaperConfig? = null
+    private var globalWallpaperPrefs: SharedPreferences? = null
+
+    private val globalWallpaperListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+            if (key == null || key == KEY_COMPONENT_GLOBAL_WALLPAPER ||
+                key == KEY_COMPONENT_LAYOUT_CLEANUP ||
+                key == KEY_APP_SCOPE_DISABLED || key == KEY_APP_COMPONENT_DISABLED
+            ) {
+                globalWallpaperCache = readGlobalWallpaper(prefs)
+            }
+        }
+
+    private fun readGlobalWallpaper(prefs: SharedPreferences) = GlobalWallpaperConfig(
+        enabled = prefs.getBoolean(KEY_COMPONENT_GLOBAL_WALLPAPER, true),
+        cleanupEnabled = prefs.getBoolean(KEY_COMPONENT_LAYOUT_CLEANUP, false),
+        disabledPackages = prefs.getStringSet(KEY_APP_SCOPE_DISABLED, emptySet())
+            ?.toSet().orEmpty(),
+        disabledComponents = prefs.getStringSet(KEY_APP_COMPONENT_DISABLED, emptySet())
+            ?.toSet().orEmpty(),
+    )
+
+    private fun globalWallpaperConfig(): GlobalWallpaperConfig {
+        globalWallpaperCache?.let { return it }
+        val prefs = HookRuntime.remotePreferences(SETTINGS_APPEARANCE_PREFERENCES)
+            ?: return GlobalWallpaperConfig()
+        val loaded = readGlobalWallpaper(prefs)
+        if (globalWallpaperPrefs == null) {
+            globalWallpaperPrefs = prefs
+            prefs.registerOnSharedPreferenceChangeListener(globalWallpaperListener)
+        }
+        globalWallpaperCache = loaded
+        return loaded
+    }
+
+    /**
+     * 「全局壁纸」是否对该进程生效：组件作用域总开关 → 软件作用域整包开关 → 该包该组件的单独开关。
+     * 包名为空（框架进程未上报）时只受总开关约束。
+     */
+    private fun globalWallpaperAllowedFor(packageName: String?): Boolean {
+        val config = globalWallpaperConfig()
+        if (!config.enabled) return false
+        val pkg = packageName ?: return true
+        if (pkg in config.disabledPackages) return false
+        return ComponentKeys.encode(ComponentKeys.GLOBAL_WALLPAPER, pkg) !in config.disabledComponents
+    }
+
+    private fun layoutCleanupAllowedFor(packageName: String): Boolean {
+        val config = globalWallpaperConfig()
+        return config.cleanupEnabled && config.enabled && packageName !in config.disabledPackages &&
+            ComponentKeys.encode(ComponentKeys.GLOBAL_WALLPAPER, packageName) !in config.disabledComponents &&
+            ComponentKeys.encode(ComponentKeys.LAYOUT_CLEANUP, packageName) !in config.disabledComponents
+    }
 
     fun applyHome(activity: Activity?) {
         if (activity == null) return
@@ -80,6 +162,7 @@ object BackgroundApplier {
             return
         }
         applyLayer(activity, BackgroundContract.CONTACTS, CONTACTS_SESSION, false)
+        DialpadBackgroundController.refresh(activity)
         adaptContactsSurfaces(activity, false)
         installContactsSurfaceRescan(activity)
     }
@@ -107,7 +190,7 @@ object BackgroundApplier {
             // 资源 id 进程内固定，只解析一次后缓存复用。
             if (contactsBgViewId == -1) contactsBgViewId = resolveId(activity, "dialer_background_view")
 
-            // 拨号盘的透明度 / 自定义背景全部由 applyDialpadOnInflate（Hook DialpadLayout.onFinishInflate）
+            // 拨号盘的透明度 / 自定义背景全部由 DialpadBackgroundController（Hook DialpadLayout.onFinishInflate）
             // 在首帧前一次性处理，这里不再逐帧 setAlpha——否则会与 inflate 时的设置反复抢夺、造成闪屏，
             // 且逐帧 setAlpha 也会把自定义模式下归零的原生底又冒出来盖住自定义图。此处仅取 bgView 句柄用于
             // 下面遍历清除时跳过它及其整棵子树（含自定义 media / 9-patch 原生底）。
@@ -120,6 +203,14 @@ object BackgroundApplier {
             // 清除逻辑把背景换成透明，setAlpha 滑块就再无视觉效果（键盘恒定透明），即透明度调节失效。
             val content = activity.findViewById<View>(android.R.id.content)
             if (content != null) adaptContactsOpaqueSurfaces(content, enabled, content, bgView)
+
+            // 联系人详情页（PeopleDetailActivity）的头像虚化底 / 滚动 / 内容容器背景是非中性色
+            // （头像模糊或主题色），通用中性底扫描清不掉；这里随重扫描一并清成透明，让模块背景透出。
+            if (enabled) {
+                clearContactsDetailSurface(activity, "container_layout")
+                clearContactsDetailSurface(activity, "zoom_scrollview")
+                clearContactsDetailSurface(activity, "content_container")
+            }
 
             // 搜索是 Miuix SearchActionMode 拉起的覆盖层（ContactsSearchFragment 的 DispatchFrameLayout），
             // 挂在 DecorView 下、android.R.id.content 之外，故上面按 content 收窄的遍历扫不到它——搜索后
@@ -164,24 +255,18 @@ object BackgroundApplier {
     // 若清成 null 会失去覆盖整块区域的背景，硬件加速脏区重绘无法擦除上一帧内容而留下残影/拖拽；
     // 保留一个铺满的透明背景即可让绘制系统正常重绘，同时背景仍透出。
     private fun adaptContactsOpaqueSurfaces(view: View?, enabled: Boolean, contentRoot: View?, skip: View?) {
-        if (view == null || view === skip) return
+        if (view == null || view === skip ||
+            view.getAdditionalInstanceField(DialpadBackdropView.OWNED_VIEW_FIELD) == true ||
+            isTransientPopup(view)) return
         if (view !== contentRoot) {
             try {
                 if (enabled) {
                     val bg = view.background
-                    // 列表条目随 RecyclerView 复用可能被重新赋上不透明白底：只要当前背景仍是不透明中性色就替换；
-                    // saved 仅在首次记录原始背景（供还原），后续复用不覆盖它。
                     if (bg != null && isOpaqueNeutralSurface(bg)) {
-                        val saved = view.getAdditionalInstanceField(CONTACTS_BG_SAVED)
-                        if (saved == null) view.setAdditionalInstanceField(CONTACTS_BG_SAVED, bg)
-                        view.background = ColorDrawable(Color.TRANSPARENT)
+                        makeTransparent(bg)
                     }
                 } else {
-                    val saved = view.getAdditionalInstanceField(CONTACTS_BG_SAVED)
-                    if (saved is Drawable) {
-                        view.background = saved
-                        view.removeAdditionalInstanceField(CONTACTS_BG_SAVED)
-                    }
+                    restoreTransparent(view.background)
                 }
             } catch (_: Throwable) {
             }
@@ -191,6 +276,122 @@ object BackgroundApplier {
                 adaptContactsOpaqueSurfaces(view.getChildAt(i), enabled, contentRoot, skip)
             }
         }
+    }
+
+    // StickyRecyclerHeadersDecoration 将字母分组标题缓存为独立 View，直接绘制到
+    // BaseRecyclerView 的 Canvas；它不是列表子 View，常规递归和 setBackground 回调都找不到。
+    fun adaptContactsPinnedHeader(header: View) {
+        if (header.javaClass.name != "com.android.contacts.list.ContactListPinnedHeaderView") return
+        val activity = findActivity(header.context) ?: return
+        if (activity.packageName != BackgroundContract.PACKAGE_CONTACTS ||
+            !matchesContactsSettings(activity.javaClass.name)) return
+        val enabled = HookRuntime.preferences().getBoolean(BackgroundContract.CONTACTS_SURFACE_ADAPT, true)
+        // 只处理该标题自身及其文字底色，不触及 RecyclerView 或其它悬浮窗。
+        adaptContactsOpaqueSurfaces(header, enabled, null, null)
+    }
+
+    // 供 View.setBackground hook 回调调用：item 重绑时一定会 setBackground，在调用后立即清除
+    // 不透明中性色底色，避免等全局布局/绘制前扫描的延迟白块。只处理联系人 content 子树内、且非
+    // 拨号盘背景板的 view；它由独立的拨号盘控制器管理，不参与列表背景透明化。
+    fun onViewBackgroundChanged(view: View?) {
+        if (view == null || view.getAdditionalInstanceField(DialpadBackdropView.OWNED_VIEW_FIELD) == true) return
+        try {
+            if (!HookRuntime.preferences().getBoolean(BackgroundContract.CONTACTS_SURFACE_ADAPT, true)) return
+            val activity = findActivity(view.context) ?: return
+            if (!matchesContactsSettings(activity.javaClass.name)) return
+            val content = activity.findViewById<View>(android.R.id.content) ?: return
+            if (!isDescendant(view, content) || isTransientPopup(view)) return
+            // 跳过拨号盘背景板及其子树（由 setAlpha 专门处理）。
+            val bgViewId = resolveId(activity, "dialer_background_view")
+            if (bgViewId != 0) {
+                val bgView = activity.findViewById<View>(bgViewId)
+                if (bgView != null && isDescendant(view, bgView)) return
+            }
+            val bg = view.background
+            if (bg != null && isOpaqueNeutralSurface(bg)) {
+                makeTransparent(bg)
+                view.invalidate()
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    // 把 drawable 设为完全透明：给 StateListDrawable 的所有状态、LayerDrawable 的所有层都套上
+    // colorFilter。只设当前状态的 colorFilter/alpha 会在状态切换后失效（滑动时 pressed 态显示原色）。
+    private val transparentFilter = android.graphics.PorterDuffColorFilter(
+        0, android.graphics.PorterDuff.Mode.SRC_OUT)
+
+    private fun makeTransparent(bg: android.graphics.drawable.Drawable) {
+        try {
+            bg.mutate().colorFilter = transparentFilter
+            when (bg) {
+                is android.graphics.drawable.StateListDrawable -> {
+                    for (i in 0 until bg.stateCount) {
+                        bg.getStateDrawable(i)?.let { makeTransparent(it) }
+                    }
+                }
+                is android.graphics.drawable.LayerDrawable -> {
+                    for (i in 0 until bg.numberOfLayers) {
+                        bg.getDrawable(i)?.let { makeTransparent(it) }
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun restoreTransparent(bg: android.graphics.drawable.Drawable?) {
+        if (bg == null) return
+        try {
+            bg.mutate().clearColorFilter()
+            when (bg) {
+                is android.graphics.drawable.StateListDrawable -> {
+                    for (i in 0 until bg.stateCount) {
+                        restoreTransparent(bg.getStateDrawable(i))
+                    }
+                }
+                is android.graphics.drawable.LayerDrawable -> {
+                    for (i in 0 until bg.numberOfLayers) {
+                        restoreTransparent(bg.getDrawable(i))
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun findActivity(ctx: android.content.Context?): Activity? {
+        var c = ctx
+        var depth = 0
+        while (c is android.content.ContextWrapper && depth < 10) {
+            if (c is Activity) return c
+            c = c.baseContext
+            depth++
+        }
+        return null
+    }
+
+    private fun isDescendant(child: View, ancestor: View): Boolean {
+        var v: View? = child
+        while (v != null) {
+            if (v === ancestor) return true
+            v = v.parent as? View
+        }
+        return false
+    }
+
+    // 联系人详情页（SubActivity / PeopleDetailActivity）的头像虚化底、滚动容器、内容容器，
+    // 其背景往往是头像虚化或主题色而非中性色，通用中性底扫描清不掉；按 id 定位后强制置透明，
+    // 首次记录原始背景供适配关闭时还原。
+    private fun clearContactsDetailSurface(activity: Activity, name: String) {
+        val id = activity.resources.getIdentifier(name, "id", activity.packageName)
+        if (id == 0) return
+        val view = activity.findViewById<View>(id) ?: return
+        val bg = view.background
+        if (bg == null) return
+        val saved = view.getAdditionalInstanceField(CONTACTS_BG_SAVED + "_" + name)
+        if (saved == null) view.setAdditionalInstanceField(CONTACTS_BG_SAVED + "_" + name, bg)
+        view.background = ColorDrawable(Color.TRANSPARENT)
     }
 
     // 缓存联系人进程内 drawable 采样色，避免同一次扫描内对同一 ConstantState 反复创建 8x8 bitmap。
@@ -213,9 +414,6 @@ object BackgroundApplier {
                 try {
                     if (state == null) return false
                     val copy = state.newDrawable().mutate()
-                    // 渲染 8x8 后取中心像素，而非 1x1。9-patch（如分组吸顶头 list_view_item_group_header_bg）
-                    // 的可拉伸区/内容区划分会让 1x1 采样落到边缘透明 padding 区，深色不透明黑条被误判为透明
-                    // 而漏清；用稍大的画布取中心点采到真正的填充色，判定才准确。
                     val bmp = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888)
                     val canvas = Canvas(bmp)
                     copy.setBounds(0, 0, 8, 8)
@@ -235,8 +433,14 @@ object BackgroundApplier {
         return maxOf(r, maxOf(g, b)) - minOf(r, minOf(g, b)) <= 24
     }
 
-    // 拨号盘键盘是点击后异步 inflate 的，Activity 生命周期回调抓不到它出现的那一刻；挂一个
-    // 常驻的轻量布局监听（带 200ms 节流），在其出现时补设 alpha / 清一次列表底，保证展开即生效。
+    // 拨号盘键盘是点击后异步 inflate 的，Activity 生命周期回调抓不到它出现的那一刻；需要在其出现后
+    // 补设 alpha / 清一次列表底。列表项随 RecyclerView 回收重绑会恢复不透明底色，必须在绘制前清除
+    // 否则会闪白块；但每帧遍历整棵树又会卡。
+    //
+    // 双监听器配合：
+    //   OnGlobalLayoutListener：布局变化时只设一个 dirty 标记（极轻量，带 16ms 节流防抖）。
+    //   OnPreDrawListener：每帧只检查 dirty 标记，为 true 才真正遍历清除，并在绘制前一帧生效
+    //   （无闪烁），随后重置标记——没有布局变化时每帧只做一次 boolean 判断，几乎零开销。
     private fun installContactsSurfaceRescan(activity: Activity) {
         try {
             if (activity.getAdditionalInstanceField(CONTACTS_RESCAN) == true) return
@@ -244,13 +448,29 @@ object BackgroundApplier {
             if (decor !is ViewGroup) return
             val observer = decor.viewTreeObserver
             if (!observer.isAlive) return
-            val listener = ViewTreeObserver.OnGlobalLayoutListener {
+
+            val globalLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
                 if (activity.isFinishing || activity.isDestroyed) return@OnGlobalLayoutListener
-                adaptContactsSurfaces(activity, true)
+                val now = SystemClock.uptimeMillis()
+                val last = activity.getAdditionalInstanceField(CONTACTS_ADAPT_AT) as? Long ?: 0L
+                if (now - last >= 16L) {
+                    activity.setAdditionalInstanceField(CONTACTS_ADAPT_AT, now)
+                    activity.setAdditionalInstanceField(CONTACTS_ADAPT_DIRTY, true)
+                }
             }
-            observer.addOnGlobalLayoutListener(listener)
-            // 保存引用，便于 Activity 销毁时摘除，避免监听器悬挂。
-            activity.setAdditionalInstanceField(CONTACTS_RESCAN, listener)
+            val preDrawListener = ViewTreeObserver.OnPreDrawListener {
+                if (activity.isFinishing || activity.isDestroyed) return@OnPreDrawListener true
+                val dirty = activity.getAdditionalInstanceField(CONTACTS_ADAPT_DIRTY) == true
+                if (dirty) {
+                    activity.setAdditionalInstanceField(CONTACTS_ADAPT_DIRTY, false)
+                    adaptContactsSurfaces(activity, false)
+                }
+                true
+            }
+            observer.addOnGlobalLayoutListener(globalLayoutListener)
+            observer.addOnPreDrawListener(preDrawListener)
+            // 用数组保存两个监听器引用，便于销毁时一并摘除。
+            activity.setAdditionalInstanceField(CONTACTS_RESCAN, arrayOf(globalLayoutListener, preDrawListener))
         } catch (error: Throwable) {
             log("installContactsSurfaceRescan", error)
         }
@@ -258,14 +478,22 @@ object BackgroundApplier {
 
     private fun removeContactsSurfaceRescan(activity: Activity) {
         try {
-            val listener = activity.getAdditionalInstanceField(CONTACTS_RESCAN)
-            if (listener !is ViewTreeObserver.OnGlobalLayoutListener) return
+            val saved = activity.getAdditionalInstanceField(CONTACTS_RESCAN)
+            if (saved !is Array<*>) return
             val decor = activity.window?.decorView
             if (decor != null) {
                 val observer = decor.viewTreeObserver
-                if (observer.isAlive) observer.removeOnGlobalLayoutListener(listener)
+                if (observer.isAlive) {
+                    saved.forEach {
+                        when (it) {
+                            is ViewTreeObserver.OnGlobalLayoutListener -> observer.removeOnGlobalLayoutListener(it)
+                            is ViewTreeObserver.OnPreDrawListener -> observer.removeOnPreDrawListener(it)
+                        }
+                    }
+                }
             }
             activity.setAdditionalInstanceField(CONTACTS_RESCAN, null)
+            activity.setAdditionalInstanceField(CONTACTS_ADAPT_DIRTY, null)
         } catch (_: Throwable) {
         }
     }
@@ -286,151 +514,199 @@ object BackgroundApplier {
         removeContacts(activity)
     }
 
-    // 拨号盘键盘由 ViewStub 点击后异步 inflate，Activity 生命周期回调抓不到它「刚 inflate、绘制第一帧
-    // 之前」的时机，只能靠布局监听在其出现后补设，但布局回调总在绘制后一帧，导致先露出原生不透明底色、
-    // 再变半透（先灰后透闪烁）。这里由 Hook DialpadLayout.onFinishInflate（after）在首帧绘制前同步处理。
-    //
-    // DialpadLayout 实际结构（见 dialer_dialpad.xml）：
-    //   DialpadLayout
-    //   ├─[0] FrameLayout  dialer_background_view   bg=dialer_background_new （整块拨号盘底，9-patch）
-    //   ├─[1] LinearLayout dialpad_container        bg=dialer_background_pad （键盘面板底，含数字键；不透明，盖住[0]）
-    //   └─[2] FrameLayout  dialer_input_container   输入框
-    // 关键：只把 dialer_background_view 设透明/隐藏并不够——dialpad_container 自己那层不透明的
-    // dialer_background_pad 会把下面全挡住（这是之前自定义图“不生效”的根因）。故两层底都要处理。
-    //
-    //  · 默认模式：dialer_background_view 与 dialpad_container 两层底一起按 opacity 设 alpha，让背景透出，
-    //    数字键（dialpad_keys_container 的子 view，各自有 alpha=1）不受容器 alpha 影响仍清晰。
-    //  · 自定义模式：把用户选的独立背景（BackgroundMediaView）塞进 dialer_background_view 内铺满，
-    //    并把 dialpad_container 的面板底 dialer_background_pad 换成透明占位（存原背景供还原），
-    //    让自定义图透出到整个键盘区，与 contacts 整页背景叠加共存。
-    // dialpadView 是 DialpadLayout 实例本身。
-    fun applyDialpadOnInflate(dialpadView: View?) {
-        if (dialpadView !is ViewGroup) return
+    // 短信（com.android.mms）两条背景通道：
+    // 主页 MMS：会话列表、验证码/推广分类列表、短信内部各设置页共用；
+    // 聊天 MMS_CHAT：会话详情页（单/多收件人、RCS 机器人、拦截会话）与新建短信页独立。
+    fun applyMmsHome(activity: Activity?) {
+        if (activity == null) return
+        removeMmsChat(activity)
+        applyLayer(activity, BackgroundContract.MMS, MMS_SESSION, false)
+        if (isMmsListActivity(activity.javaClass.name)) {
+            adaptMmsListSurfaces(activity, false)
+            installMmsSurfaceRescan(activity)
+        }
+    }
+
+    fun applyMmsChat(activity: Activity?) {
+        if (activity == null) return
+        removeMmsHome(activity)
+        // 聊天页未单独设置背景时跟随短信主页图（主页也无图则 applyLayer 不渲染）。
+        val slot = if (BackgroundContract.query(activity, BackgroundContract.MMS_CHAT).exists) {
+            BackgroundContract.MMS_CHAT
+        } else {
+            BackgroundContract.MMS
+        }
+        applyLayer(activity, slot, MMS_CHAT_SESSION, false)
+    }
+
+    // 列表类主页：列表项 selector 是纯白实底，需要中性色递归清除 + 重扫监听。
+    private fun isMmsListActivity(className: String?) = className in MMS_LIST_ACTIVITIES
+
+    private val MMS_LIST_ACTIVITIES = hashSetOf(
+        "com.android.mms.ui.MmsTabActivity",
+        // 验证码/推广/通知分类列表（y2 Fragment 宿主），列表项同为白底 ConversationListItem。
+        "com.android.mms.ui.FlatMessageListActivity",
+    )
+
+    // 会话列表页：ConversationListItem 的 selector 底是纯白实底（miuix_appcompat_white），
+    // 复用联系人的不透明中性色递归清除方案（colorFilter 透明，不替换 background 保留 selector/padding），
+    // 但跳过 FAB 子树。仅作用于列表页；聊天页绝不走这里——收件气泡本身就是中性白（#ffffff/#f2f2f2）。
+    private fun adaptMmsListSurfaces(activity: Activity, throttled: Boolean) {
         try {
-            val dialpad: ViewGroup = dialpadView
-            val ctx: Context = dialpad.context
-            val enabled = HookRuntime.preferences().getBoolean(BackgroundContract.CONTACTS_SURFACE_ADAPT, true)
-            val opacity = HookRuntime.preferences().getInt(BackgroundContract.CONTACTS_DIALPAD_OPACITY, 60)
-            val padAlpha = opacity.coerceIn(0, 100) / 100f
-            val mode = HookRuntime.preferences().getInt(
-                BackgroundContract.CONTACTS_DIALPAD_BG_MODE, BackgroundContract.CONTACTS_DIALPAD_BG_DEFAULT)
-
-            val pkg = ctx.packageName
-            val bgId = ctx.resources.getIdentifier("dialer_background_view", "id", pkg)
-            val containerId = ctx.resources.getIdentifier("dialpad_container", "id", pkg)
-            val bgView = if (bgId == 0) null else dialpad.findViewById<View>(bgId)
-            val container = if (containerId == 0) null else dialpad.findViewById<View>(containerId)
-            val bgHost: ViewGroup = if (bgView is ViewGroup) bgView else dialpad
-
-            val source = BackgroundContract.query(ctx, BackgroundContract.CONTACTS_DIALPAD)
-            // 拨号盘背景仅支持图片：新选图入口已限定 image/*，此处再兜底排除历史遗留的视频配置，
-            // 视频源直接回退默认模式、不在拨号盘播放。
-            val custom = enabled && mode == BackgroundContract.CONTACTS_DIALPAD_BG_CUSTOM
-                && source.exists && !source.isVideo()
-
-            // 先清旧会话：拨号盘复用时避免叠加多层，并还原上次改动的面板底。
-            removeDialpadMedia(dialpad)
-
-            if (custom) {
-                // 自定义图塞进 dialer_background_view 内铺满（置底、不挡数字键）；原生 9-patch 底随
-                // 背景板 alpha 归零而隐去；面板底 dialer_background_pad 换透明占位让图透出。
-                val media = BackgroundMediaView(ctx, source)
-                // 拨号盘键盘面板不透明度滑块也作用于自定义图：与该图自身 opacity 叠乘，滑块不再失效。
-                media.alpha = (if (enabled) padAlpha else 1f) * (source.opacity / 100f)
-                // 给自定义背景图裁出四角圆角（30dp）：用 BackgroundMediaView 内部 dispatchDraw 自绘裁切，
-                // 逐帧按当前尺寸构造路径，不受面板从底部弹出动画的影响。
-                val density = ctx.resources.displayMetrics.density
-                media.setTopCornerRadius(30f * density)
-                bgHost.addView(media, 0, FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-                dialpad.setAdditionalInstanceField(DIALPAD_SESSION, media)
-                // 先存原生 9-patch 底（首次），再换透明，让自定义图透出且切回默认能还原原底。
-                if (bgView != null) {
-                    val orig = bgView.background
-                    if (orig != null && bgView.getAdditionalInstanceField(DIALPAD_BGVIEW_SAVED) == null) {
-                        bgView.setAdditionalInstanceField(DIALPAD_BGVIEW_SAVED, orig)
-                    }
-                    bgView.alpha = 1f
-                    bgView.background = ColorDrawable(Color.TRANSPARENT)
-                }
-                clearDialpadPanelBackground(container)
-            } else {
-                // 默认模式（beta5 已验证有效的做法）：不透明度直接对拨号盘背景板 dialer_background_view
-                // 本身 setAlpha —— 保留它原生的 9-patch 底作为 setAlpha 的作用对象（清除遍历已跳过它及
-                // 其子树，见 adaptContactsSurfaces 的 skip，故其底不会被通用中性底清成透明而使滑块失效）。
-                // 先撤销上次自定义模式对 bgView / container 的改动，再对 bgView 施加透明度。
-                val a = if (enabled) padAlpha else 1f
-                restoreDialpadPanelBackground(container)
-                container?.alpha = 1f
-                if (bgView != null) {
-                    restoreDialpadBgView(bgView) // 若曾在自定义模式换成透明底，先还原原生 9-patch 底
-                    bgView.alpha = a
-                }
+            if (throttled) {
+                val last = activity.getAdditionalInstanceField(MMS_ADAPT_AT) as? Long
+                val now = SystemClock.uptimeMillis()
+                if (last != null && now - last < 200L) return
+                activity.setAdditionalInstanceField(MMS_ADAPT_AT, now)
             }
+            contactsSampledColors.clear()
+            val content = activity.findViewById<View>(android.R.id.content) ?: return
+            val fabId = resolveId(activity, "fab")
+            val fab = if (fabId == 0) null else activity.findViewById<View>(fabId)
+            adaptContactsOpaqueSurfaces(content, true, content, fab)
         } catch (error: Throwable) {
-            log("applyDialpadOnInflate", error)
+            log("adaptMmsListSurfaces", error)
         }
     }
 
-    // 把自定义模式下换成透明的 dialer_background_view 原生 9-patch 底还原回去（若曾保存）。
-    private fun restoreDialpadBgView(bgView: View?) {
-        if (bgView == null) return
+    // 与 installContactsSurfaceRescan 同构：OnGlobalLayout 只打 dirty 标，OnPreDraw 为 true
+    // 才真正遍历清除（绘制前一帧生效，无闪白），无布局变化时每帧只有一次 boolean 判断。
+    private fun installMmsSurfaceRescan(activity: Activity) {
         try {
-            val saved = bgView.getAdditionalInstanceField(DIALPAD_BGVIEW_SAVED)
-            if (saved is Drawable) {
-                bgView.background = saved
-                bgView.removeAdditionalInstanceField(DIALPAD_BGVIEW_SAVED)
+            if (activity.getAdditionalInstanceField(MMS_RESCAN) == true) return
+            val decor = activity.window?.decorView
+            if (decor !is ViewGroup) return
+            val observer = decor.viewTreeObserver
+            if (!observer.isAlive) return
+
+            val globalLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+                if (activity.isFinishing || activity.isDestroyed) return@OnGlobalLayoutListener
+                val now = SystemClock.uptimeMillis()
+                val last = activity.getAdditionalInstanceField(MMS_ADAPT_AT) as? Long ?: 0L
+                if (now - last >= 16L) {
+                    activity.setAdditionalInstanceField(MMS_ADAPT_AT, now)
+                    activity.setAdditionalInstanceField(MMS_ADAPT_DIRTY, true)
+                }
+            }
+            val preDrawListener = ViewTreeObserver.OnPreDrawListener {
+                if (activity.isFinishing || activity.isDestroyed) return@OnPreDrawListener true
+                if (activity.getAdditionalInstanceField(MMS_ADAPT_DIRTY) == true) {
+                    activity.setAdditionalInstanceField(MMS_ADAPT_DIRTY, false)
+                    adaptMmsListSurfaces(activity, false)
+                }
+                true
+            }
+            observer.addOnGlobalLayoutListener(globalLayoutListener)
+            observer.addOnPreDrawListener(preDrawListener)
+            activity.setAdditionalInstanceField(MMS_RESCAN, arrayOf(globalLayoutListener, preDrawListener))
+        } catch (error: Throwable) {
+            log("installMmsSurfaceRescan", error)
+        }
+    }
+
+    private fun removeMmsSurfaceRescan(activity: Activity) {
+        try {
+            val saved = activity.getAdditionalInstanceField(MMS_RESCAN)
+            if (saved !is Array<*>) return
+            val decor = activity.window?.decorView
+            if (decor != null) {
+                val observer = decor.viewTreeObserver
+                if (observer.isAlive) {
+                    saved.forEach {
+                        when (it) {
+                            is ViewTreeObserver.OnGlobalLayoutListener -> observer.removeOnGlobalLayoutListener(it)
+                            is ViewTreeObserver.OnPreDrawListener -> observer.removeOnPreDrawListener(it)
+                        }
+                    }
+                }
+            }
+            activity.setAdditionalInstanceField(MMS_RESCAN, null)
+            activity.setAdditionalInstanceField(MMS_ADAPT_DIRTY, null)
+        } catch (_: Throwable) {
+        }
+    }
+
+    fun stopMmsHome(activity: Activity?) {
+        stopLayer(activity, MMS_SESSION)
+    }
+
+    fun stopMmsChat(activity: Activity?) {
+        stopLayer(activity, MMS_CHAT_SESSION)
+    }
+
+    fun destroyMmsHome(activity: Activity?) {
+        removeMmsHome(activity)
+    }
+
+    fun destroyMmsChat(activity: Activity?) {
+        removeMmsChat(activity)
+    }
+
+    private fun removeMmsHome(activity: Activity?) {
+        if (activity == null) return
+        try {
+            removeMmsSurfaceRescan(activity)
+            val old = activity.getAdditionalInstanceField(MMS_SESSION) as? LayerSession
+            if (old != null) removeLayer(activity, MMS_SESSION, old)
+        } catch (error: Throwable) {
+            log("removeMmsHome", error)
+        }
+    }
+
+    private fun removeMmsChat(activity: Activity?) {
+        if (activity == null) return
+        try {
+            val old = activity.getAdditionalInstanceField(MMS_CHAT_SESSION) as? LayerSession
+            if (old != null) removeLayer(activity, MMS_CHAT_SESSION, old)
+        } catch (error: Throwable) {
+            log("removeMmsChat", error)
+        }
+    }
+
+    // View.setBackground hook 回调（短信进程）：列表项随 RecyclerView 回收重绑会恢复 selector
+    // 纯白底，在 setBackground 后立即清除，避免等绘制前扫描的延迟白块。
+    fun onMmsViewBackgroundChanged(view: View?) {
+        if (view == null) return
+        try {
+            val activity = findActivity(view.context) ?: return
+            if (!isMmsListActivity(activity.javaClass.name)) return
+            val content = activity.findViewById<View>(android.R.id.content) ?: return
+            if (!isDescendant(view, content) || isTransientPopup(view)) return
+            val bg = view.background
+            if (bg != null && isOpaqueNeutralSurface(bg)) {
+                makeTransparent(bg)
+                view.invalidate()
             }
         } catch (_: Throwable) {
         }
     }
 
-    // 自定义模式下把 dialpad_container 的不透明面板底换成透明占位（首次记录原背景供还原）。
-    private fun clearDialpadPanelBackground(container: View?) {
-        if (container == null) return
-        try {
-            val bg = container.background
-            if (bg != null) {
-                val saved = container.getAdditionalInstanceField(CONTACTS_BG_SAVED)
-                if (saved == null) container.setAdditionalInstanceField(CONTACTS_BG_SAVED, bg)
-                container.background = ColorDrawable(Color.TRANSPARENT)
-            }
-            container.alpha = 1f
-        } catch (_: Throwable) {
+    private fun isTransientPopup(view: View): Boolean {
+        // PopupWindow and Dialog have their own window, but can share the Activity Context.
+        // Some MIUIX panels are hosted in the Activity window instead; exclude those too.
+        var node: View? = view
+        while (node != null) {
+            val type = node.javaClass.name
+            if (type == "miuix.appcompat.internal.widget.DialogParentPanel2" ||
+                type == "miuix.popupwidget.widget.PopupView" ||
+                type == "android.widget.PopupWindow\$PopupDecorView" ||
+                (type == "miuix.smooth.SmoothFrameLayout2" && isMmsListPopup(node))
+            ) return true
+            node = node.parent as? View
         }
+        return false
     }
 
-    private fun restoreDialpadPanelBackground(container: View?) {
-        if (container == null) return
-        try {
-            // 先撤销默认模式插入的置底面板背景 view：移除它并把面板底还给 container 自身。
-            val panel = container.getAdditionalInstanceField(DIALPAD_PANEL_ALPHA_VIEW)
-            if (panel is View) {
-                val parent = panel.parent
-                if (parent is ViewGroup) parent.removeView(panel)
-                container.removeAdditionalInstanceField(DIALPAD_PANEL_ALPHA_VIEW)
+    private fun isMmsListPopup(frame: View): Boolean {
+        val group = frame as? ViewGroup ?: return false
+        for (i in 0 until group.childCount) {
+            val spring = group.getChildAt(i) as? ViewGroup ?: continue
+            if (spring.javaClass.name != "miuix.springback.view.SpringBackLayout") continue
+            for (j in 0 until spring.childCount) {
+                if (spring.getChildAt(j) is android.widget.ListView) return true
             }
-            val saved = container.getAdditionalInstanceField(CONTACTS_BG_SAVED)
-            if (saved is Drawable) {
-                container.background = saved
-                container.removeAdditionalInstanceField(CONTACTS_BG_SAVED)
-            }
-        } catch (_: Throwable) {
         }
-    }
-
-    // 移除拨号盘上已叠加的自定义背景层（若有）。原生底 / 面板底的复位由调用方按当前模式重设。
-    private fun removeDialpadMedia(dialpad: ViewGroup) {
-        try {
-            val old = dialpad.getAdditionalInstanceField(DIALPAD_SESSION)
-            if (old is BackgroundMediaView) {
-                val parent = old.parent
-                if (parent is ViewGroup) parent.removeView(old)
-                old.dispose()
-            }
-            dialpad.removeAdditionalInstanceField(DIALPAD_SESSION)
-        } catch (_: Throwable) {
-        }
+        return false
     }
 
     private fun removeContacts(activity: Activity?) {
@@ -466,6 +742,10 @@ object BackgroundApplier {
 
         // Keep permission / authorization / transient confirmation windows fully native.
         if (isSensitiveTransientActivity(className) || isSensitiveTransientWindow(activity)) return true
+
+        // 「全局壁纸」总控整条 GLOBAL 通道：组件作用域一处（全局）、软件作用域每包一处。
+        // 关闭即该包所有大页面退回原生底；默认开启，所以默认行为与之前一致。
+        if (!globalWallpaperAllowedFor(packageName)) return true
 
         if (BackgroundContract.PACKAGE_SETTINGS == packageName) {
             if ("com.android.settings.MiuiSettings" == className) return true
@@ -514,7 +794,49 @@ object BackgroundApplier {
             return true
         }
 
-        return true
+        // 短信由独立的 mms 通道处理，global 一律跳过。
+        if (BackgroundContract.PACKAGE_MMS == packageName) {
+            return true
+        }
+
+        // 通用通道：以上「单独适配过规则」的进程之外，一律交给结构判定——只要当前窗口是
+        // 全屏且已承载内容的大页面就套用全局背景（见 isGenericFullScreenPage）。
+        // 这是 dynamic 那套「不看包名、只看结构」的思路在背景通道上的落地：新增一个应用
+        // 不必再往这里补关键词表，把它加进 LSPosed 作用域即可。
+        return !isGenericFullScreenPage(activity)
+    }
+
+    /**
+     * 通用页面判定：与 dynamic 的 CardSurfaceDetector 同源——不看包名、不看资源 id，
+     * 只看窗口结构本身。这里判的是「当前 Activity 是不是一个全屏、已承载内容的大页面」：
+     *
+     *  1. 窗口必须是不透明的全屏窗口（宽高均为 MATCH_PARENT）。浮窗、半透明、对话框形态
+     *     （权限 / 支付 / 登录 / 凭据 / 选择器）在 [isSensitiveTransientWindow] 里已排除，
+     *     这里再兜一次，保证本判定自成闭环、可独立复用。
+     *  2. 内容层 android.R.id.content 存在，且至少有一个可见子视图——空窗口、纯骨架、
+     *     无内容的中转 Activity 不挂。
+     *
+     * 刻意不卡「内容量出来多大」：onContentChanged 时尺寸还是 0，卡尺寸会让首帧挂不上、
+     * 退化成 post 异步补挂，于是先绘制原生底色再补背景、闪一下。宁可让空页面也挂上背景
+     * （随后 inflate 的内容会盖住它，无副作用），也不牺牲首帧无闪。
+     */
+    private fun isGenericFullScreenPage(activity: Activity?): Boolean {
+        if (activity == null) return false
+        try {
+            val lp = activity.window?.attributes ?: return false
+            if (lp.width != WindowManager.LayoutParams.MATCH_PARENT
+                || lp.height != WindowManager.LayoutParams.MATCH_PARENT
+            ) {
+                return false
+            }
+        } catch (_: Throwable) {
+            return false
+        }
+        val content = activity.findViewById<View>(android.R.id.content) as? ViewGroup ?: return false
+        for (i in 0 until content.childCount) {
+            if (content.getChildAt(i).visibility == View.VISIBLE) return true
+        }
+        return false
     }
 
     private fun isSensitiveTransientWindow(activity: Activity?): Boolean {
@@ -656,11 +978,14 @@ object BackgroundApplier {
             || n.contains("settings")
     }
 
-    // 通讯录与拨号的拨号盘/联系人/最近通话主界面统一由 PeopleActivity 承载
-    // （TwelveKeyDialer/ContactsFrontDoor 等均为其 alias），只对该主界面注入背景，
-    // 天然排除编辑、来电、快速联系卡、权限弹窗等其它页面。
+    // 通讯录主界面（PeopleActivity）、联系人详情页（SubActivity 承载 ContactDetailAtyFragment /
+    // PeopleDetailAtyFragment）以及 PeopleDetailActivity 共用同一 contacts 背景通道；
+    // 来电、快速联系卡、权限弹窗等其它页面不在此列。
     private fun matchesContactsSettings(className: String?): Boolean {
-        return className != null && className == "com.android.contacts.activities.PeopleActivity"
+        if (className == null) return false
+        return className == "com.android.contacts.activities.PeopleActivity" ||
+            className == "com.android.contacts.activities.SubActivity" ||
+            className == "com.android.contacts.activities.PeopleDetailActivity"
     }
 
     private fun removeGlobal(activity: Activity?) {
@@ -696,8 +1021,8 @@ object BackgroundApplier {
             // their expanded action bar is a sibling of android.R.id.content, so the media must
             // sit one level higher in the known ActionBarOverlayLayout to continue behind the
             // status bar, back button and large title. We never promote to DecorView.
-            if (old != null && old.media.sourceKey() == source.cacheKey()
-                && old.media.parent === host && old.observedRoot === host
+            if (old != null && !old.media.loadFailed && old.media.sourceKey() == source.cacheKey()
+                && old.media.parent === host && (old.observedRoot === host || !old.media.isReady)
             ) {
                 old.media.onHostResume()
                 old.refresh(activity, home)
@@ -714,27 +1039,36 @@ object BackgroundApplier {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
 
             val session = LayerSession(media)
-            if (host !== content) session.clear(host)
-            session.clear(content)
-            if (originalRoot != null) session.clear(originalRoot)
-            clearNamed(activity, session, "nestedheaderlayout")
-            clearNamed(activity, session, "nested_header_layout")
-            clearNamed(activity, session, "scroll_headers")
-            clearNamed(activity, session, "main_content")
-            if (!home) {
-                clearNamed(activity, session, "prefs_container")
-                clearNamed(activity, session, "preference_recyclerview")
-                clearNamed(activity, session, "recycler_view")
-                clearNamed(activity, session, "content")
-                clearNamed(activity, session, "content_view")
-                clearNamed(activity, session, "content_wrapper")
-                clearNamed(activity, session, "action_bar_activity_content")
-                clearNamed(activity, session, "area_content")
-                clearNamed(activity, session, "auto_content")
-            }
             host.addView(media, 0, mediaParams)
-            session.attach(activity, host, home, transparentTopBar)
             activity.setAdditionalInstanceField(fieldKey, session)
+            media.onReady = {
+                if (!activity.isDestroyed && media.parent === host) {
+                    if (host !== content) session.clear(host)
+                    session.clear(content)
+                    if (originalRoot != null) session.clear(originalRoot)
+                    clearNamed(activity, session, "nestedheaderlayout")
+                    clearNamed(activity, session, "nested_header_layout")
+                    clearNamed(activity, session, "scroll_headers")
+                    clearNamed(activity, session, "main_content")
+                    if (!home) {
+                        clearNamed(activity, session, "prefs_container")
+                        clearNamed(activity, session, "preference_recyclerview")
+                        clearNamed(activity, session, "recycler_view")
+                        clearNamed(activity, session, "content")
+                        clearNamed(activity, session, "content_view")
+                        clearNamed(activity, session, "content_wrapper")
+                        clearNamed(activity, session, "action_bar_activity_content")
+                        clearNamed(activity, session, "area_content")
+                        clearNamed(activity, session, "auto_content")
+                        // 联系人详情页（PeopleDetailActivity）专用容器：头像模糊底 / 滚动容器 / 内容容器，
+                        // 其背景可能是头像虚化或主题色而非中性色，通用中性底扫描清不掉，这里强制透明。
+                        clearNamed(activity, session, "container_layout")
+                        clearNamed(activity, session, "zoom_scrollview")
+                        clearNamed(activity, session, "content_container")
+                    }
+                    session.attach(activity, host, home, transparentTopBar)
+                }
+            }
             if (BackgroundContract.GLOBAL == slot) {
                 diagnostic(activity, "applied host=" + host.javaClass.name
                     + " root=" + (if (originalRoot == null) "none" else originalRoot.javaClass.name)
@@ -827,7 +1161,7 @@ object BackgroundApplier {
             val previous = activity.getAdditionalInstanceField(GLOBAL_DIAGNOSTIC)
             if (message == previous) return
             activity.setAdditionalInstanceField(GLOBAL_DIAGNOSTIC, message)
-            log("[HyperBackground] " + activity.packageName + " " + message)
+            com.ciallo.hyperbackground.util.log("[HyperBackground] " + activity.packageName + " " + message)
             BackgroundContract.reportDiagnostic(activity, message)
         } catch (_: Throwable) {
         }
@@ -853,13 +1187,9 @@ object BackgroundApplier {
     }
 
     fun shouldSuppressDeviceShader(fragment: Any?): Boolean {
-        return try {
-            val context = contextFromFragment(fragment)
-            context != null && BackgroundContract.query(context, BackgroundContract.DEVICE).exists
-        } catch (error: Throwable) {
-            log("shouldSuppressDeviceShader", error)
-            false
-        }
+        val session = fragment?.getAdditionalInstanceField(DEVICE_SESSION) as? DeviceSession ?: return false
+        return session.media.hasRenderedFrame && !session.media.loadFailed &&
+            session.media.isAttachedToWindow && session.media.parent === session.backgroundView.parent
     }
 
     fun applyDevice(fragment: Any?) {
@@ -874,8 +1204,14 @@ object BackgroundApplier {
                 if (activity != null) applyFontMode(activity)
                 return
             }
-            if (old != null && old.media.sourceKey() == source.cacheKey()) {
-                stopOriginalShader(fragment, old.backgroundView)
+            if (old != null && !old.media.loadFailed && old.media.sourceKey() == source.cacheKey()
+                && old.media.parent != null && old.media.parent === old.backgroundView.parent
+                && fragment.getObjectField("mBgEffectView") === old.backgroundView
+            ) {
+                if (old.media.hasRenderedFrame) {
+                    old.backgroundView.visibility = View.INVISIBLE
+                    stopOriginalShader(fragment, old.backgroundView)
+                }
                 old.media.onHostResume()
                 if (activity != null) applyFontMode(activity)
                 return
@@ -888,7 +1224,9 @@ object BackgroundApplier {
             val parent = backgroundView.parent as ViewGroup
             val media = BackgroundMediaView(context, source)
             if (old != null) removeDevice(fragment, old, false)
-            stopOriginalShader(fragment, backgroundView)
+            if (rememberedVisibility != Int.MIN_VALUE) {
+                backgroundView.visibility = rememberedVisibility
+            }
             var index = parent.indexOfChild(backgroundView)
             if (index < 0) index = 0
             try {
@@ -904,8 +1242,14 @@ object BackgroundApplier {
                 backgroundView,
                 if (rememberedVisibility != Int.MIN_VALUE) rememberedVisibility else backgroundView.visibility,
                 media)
-            backgroundView.visibility = View.INVISIBLE
             fragment.setAdditionalInstanceField(DEVICE_SESSION, session)
+            media.onFirstFrame = {
+                if (fragment.getAdditionalInstanceField(DEVICE_SESSION) === session &&
+                    !media.loadFailed && media.parent === parent && backgroundView.parent === parent) {
+                    backgroundView.visibility = View.INVISIBLE
+                    stopOriginalShader(fragment, backgroundView)
+                }
+            }
             if (activity != null) applyFontMode(activity)
         } catch (error: Throwable) {
             log("applyDevice", error)
@@ -1008,23 +1352,19 @@ object BackgroundApplier {
     }
 
     private fun log(stage: String, error: Throwable) {
-        log("[HyperBackground] " + stage + " failed: " + error)
-        log(error)
+        com.ciallo.hyperbackground.util.log("[HyperBackground] " + stage + " failed: " + error)
+        com.ciallo.hyperbackground.util.log(error)
     }
 
     private class LayerSession(val media: BackgroundMediaView) {
-        // Some external-settings pages (security center 应用设置/隐私与安全) build their top/stat
-        // cards asynchronously (permission usage is loaded after the first frame), so a single
-        // clear at attach/refresh time runs before those opaque neutral panels exist or are
-        // measured, leaving black/white blocks until the next onResume. Keep re-clearing on
-        // every layout pass for a short budget after the page appears so late-inflated panels
-        // are caught without a manual re-entry, then detach the observer to avoid overhead.
         private companion object {
             const val RESCAN_WINDOW_MS = 2500L
         }
 
         private val clearedViews = ArrayList<View>()
         private val originalBackgrounds = ArrayList<Drawable>()
+        private val clearedImages = ArrayList<ImageView>()
+        private val originalImages = ArrayList<Drawable>()
         private val actionBarSurfaces = ArrayList<ActionBarSurface>()
         var observedRoot: ViewGroup? = null
             private set
@@ -1037,8 +1377,6 @@ object BackgroundApplier {
         private var layoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
         private var rescanDeadline = 0L
         private var lastRescanAt = 0L
-        // 缓存 drawable 采样色，避免同一次扫描内对同一 ConstantState 反复创建 bitmap 采样。
-        // 用 ConstantState 做 key：共享状态的 drawable 复用采样结果，ColorDrawable 已直接取色不走缓存。
         private val sampledColors = IdentityHashMap<Drawable.ConstantState, Int>()
 
         fun clear(view: View?) {
@@ -1062,62 +1400,46 @@ object BackgroundApplier {
         fun refresh(activity: Activity, home: Boolean) {
             val root = observedRoot
             if (home || root == null) return
+            if (activity.packageName == BackgroundContract.PACKAGE_SETTINGS ||
+                !layoutCleanupAllowedFor(activity.packageName)) {
+                removeLayoutRescan()
+                return
+            }
             sampledColors.clear()
             clearPageSurfaces(activity, root, root, 0)
             if (transparentTopBar) clearActionBarSurfaces(activity, root, 0)
-            // Reopen the rescan window on every refresh (e.g. returning from a sub-page) so a
-            // page re-entered after its cards were recycled is cleaned up again automatically.
             observedActivity = activity
             rescanDeadline = SystemClock.uptimeMillis() + RESCAN_WINDOW_MS
-            if (layoutListener == null) installLayoutRescan(activity, root)
+            if (layoutListener == null) installLayoutRescan(root)
         }
 
-        // Watch layout passes on the observed root: opaque neutral panels created after the
-        // first frame (async permission stats etc.) trigger a fresh clear. The listener is
-        // self-limiting — it detaches once the rescan window elapses so long-lived pages do
-        // not pay for a global-layout callback forever.
-        private fun installLayoutRescan(activity: Activity, root: ViewGroup?) {
-            if (root == null) return
-            try {
-                val observer = root.viewTreeObserver
-                if (!observer.isAlive) return
-                rescanDeadline = SystemClock.uptimeMillis() + RESCAN_WINDOW_MS
-                val listener = ViewTreeObserver.OnGlobalLayoutListener {
-                    val observed = observedRoot
-                    val observedAct = observedActivity
-                    if (observed == null || observedAct == null) {
-                        removeLayoutRescan()
-                        return@OnGlobalLayoutListener
-                    }
-                    if (observedAct.isFinishing || observedAct.isDestroyed) {
-                        removeLayoutRescan()
-                        return@OnGlobalLayoutListener
-                    }
-                    // 200ms 节流：页面加载时会触发多次 layout pass，每次都全树遍历开销很大。
-                    // 合并高频回调，只在节流窗口到期时执行一次补扫。
-                    val now = SystemClock.uptimeMillis()
-                    if (now - lastRescanAt < 200L) return@OnGlobalLayoutListener
-                    lastRescanAt = now
-                    clearPageSurfaces(observedAct, observed, observed, 0)
-                    if (transparentTopBar) clearActionBarSurfaces(observedAct, observed, 0)
-                    if (now > rescanDeadline) removeLayoutRescan()
+        private fun installLayoutRescan(root: ViewGroup) {
+            val observer = root.viewTreeObserver
+            if (!observer.isAlive) return
+            val listener = ViewTreeObserver.OnGlobalLayoutListener {
+                val observed = observedRoot
+                val activity = observedActivity
+                if (observed == null || activity == null || activity.isFinishing || activity.isDestroyed ||
+                    !layoutCleanupAllowedFor(activity.packageName)) {
+                    removeLayoutRescan()
+                    return@OnGlobalLayoutListener
                 }
-                layoutListener = listener
-                observer.addOnGlobalLayoutListener(listener)
-            } catch (_: Throwable) {
+                val now = SystemClock.uptimeMillis()
+                if (now - lastRescanAt < 200L) return@OnGlobalLayoutListener
+                lastRescanAt = now
+                sampledColors.clear()
+                clearPageSurfaces(activity, observed, observed, 0)
+                if (transparentTopBar) clearActionBarSurfaces(activity, observed, 0)
+                if (now > rescanDeadline) removeLayoutRescan()
             }
+            layoutListener = listener
+            observer.addOnGlobalLayoutListener(listener)
         }
 
         private fun removeLayoutRescan() {
             val listener = layoutListener ?: return
-            try {
-                val root = observedRoot
-                if (root != null) {
-                    val observer = root.viewTreeObserver
-                    if (observer.isAlive) observer.removeOnGlobalLayoutListener(listener)
-                }
-            } catch (_: Throwable) {
-            }
+            val observer = observedRoot?.viewTreeObserver
+            if (observer != null && observer.isAlive) observer.removeOnGlobalLayoutListener(listener)
             layoutListener = null
         }
 
@@ -1128,6 +1450,14 @@ object BackgroundApplier {
         }
 
         fun restore() {
+            for (i in clearedImages.indices) {
+                try {
+                    clearedImages[i].setImageDrawable(originalImages[i])
+                } catch (_: Throwable) {
+                }
+            }
+            clearedImages.clear()
+            originalImages.clear()
             for (i in clearedViews.indices) {
                 try {
                     clearedViews[i].background = originalBackgrounds[i]
@@ -1214,8 +1544,16 @@ object BackgroundApplier {
         }
 
         private fun clearPageSurfaces(activity: Activity, view: View?, root: View, depth: Int) {
-            if (view == null || view === media) return
+            if (view == null || view === media ||
+                view.getAdditionalInstanceField(DialpadBackdropView.OWNED_VIEW_FIELD) == true ||
+                activity.packageName == BackgroundContract.PACKAGE_PHONE && isTransientPopup(view)) return
+            if (activity.packageName == BackgroundContract.PACKAGE_MMS) {
+                val idName = resourceEntryName(activity, view.id)
+                if (idName == "message_list" || idName == "message_list_animator" ||
+                    idName == "bottom_panel") return
+            }
             if (view.visibility != View.VISIBLE) return
+            if (view is ImageView && isPageImage(activity, view, root)) clearPageImage(view)
             if (isPageSurface(activity, view, root, depth)) clear(view)
             if (view is ViewGroup) {
                 for (i in 0 until view.childCount) {
@@ -1224,33 +1562,43 @@ object BackgroundApplier {
             }
         }
 
+        private fun isPageImage(activity: Activity, view: ImageView, root: View): Boolean {
+            if (view.drawable == null) return false
+            val width = maxOf(root.width, activity.resources.displayMetrics.widthPixels)
+            val height = maxOf(root.height, activity.resources.displayMetrics.heightPixels)
+            if (view.width < width * 0.72f || view.height < height * 0.32f) return false
+            val name = resourceEntryName(activity, view.id)
+            return containsAny(name, "background", "wallpaper", "backdrop", "mask", "surface") ||
+                (view.width >= width * 0.90f && view.height >= height * 0.62f)
+        }
+
+        private fun clearPageImage(view: ImageView) {
+            if (!clearedImages.contains(view)) {
+                clearedImages.add(view)
+                originalImages.add(view.drawable)
+            }
+            view.setImageDrawable(null)
+        }
+
         private fun isPageSurface(activity: Activity, view: View, root: View, depth: Int): Boolean {
             if (view === root) return true
             val bg = view.background ?: return false
-
             val rootWidth = maxOf(root.width, activity.resources.displayMetrics.widthPixels)
             val rootHeight = maxOf(root.height, activity.resources.displayMetrics.heightPixels)
             val width = view.width
             val height = view.height
             val large = width >= (rootWidth * 0.72f).toInt() && height >= (rootHeight * 0.32f).toInt()
-
             val idName = resourceEntryName(activity, view.id)
             val pkg = activity.packageName
 
-            // Device interconnection uses a full-width opaque host surface around the
-            // actual cards. Clear only that page-level host; cards keep horizontal margins.
             if ("com.milink.service" == pkg
                 && view is ViewGroup
                 && width >= (rootWidth * 0.965f).toInt()
                 && height >= (rootHeight * 0.05f).toInt()
                 && !containsAny(idName, "card", "button", "switch", "checkbox", "icon", "image", "banner")
-            ) {
-                return true
-            }
+            ) return true
 
-            // The supplied Phone/Account/Theme builds split a Miuix page into several
-            // full-width host panels instead of one full-height root. Clear those host
-            // panels while retaining inset cards and controls.
+            if (isCardView(view)) return false
             val externalSettingsPage = BackgroundContract.PACKAGE_PHONE == pkg
                 || BackgroundContract.PACKAGE_ACCOUNT == pkg
                 || BackgroundContract.PACKAGE_THEME_MANAGER == pkg
@@ -1263,30 +1611,23 @@ object BackgroundApplier {
                 && width >= (rootWidth * 0.94f).toInt()
                 && height >= (rootHeight * 0.15f).toInt()
                 && !containsAny(idName, "card", "button", "switch", "checkbox", "icon", "image", "banner")
-            ) {
-                return true
-            }
+            ) return true
 
-            // Some external-settings pages (security center 应用设置/隐私与安全) place opaque
-            // neutral ColorDrawable panels around their cards (e.g. top_container/top_view,
-            // the stat-card ConstraintLayout). In dark mode they read as black blocks and in
-            // light mode as white blocks over the wallpaper. Clear only fully-opaque neutral
-            // solid colors (black/white/grey); semi-transparent card surfaces (e.g. #24FFFFFF
-            // GradientDrawable/CardDrawable) and coloured controls are intentionally kept.
             if (externalSettingsPage
                 && width >= (rootWidth * 0.5f).toInt()
                 && height >= (rootHeight * 0.05f).toInt()
                 && isOpaqueNeutralColorDrawable(bg)
-            ) {
-                return true
-            }
+            ) return true
 
             if (!large) return false
 
-            val cls = view.javaClass.name.lowercase()
+            // A large ImageView with a neutral opaque background is a valid surface;
+            // clear only its background, never its image drawable.
+            if (view is ImageView) return isOpaqueNeutralColorDrawable(bg)
 
+            val cls = view.javaClass.name.lowercase()
             if (containsAny(idName, "card", "button", "switch", "checkbox", "icon", "avatar", "image", "banner", "header_card")) return false
-            if (containsAny(cls, "cardview", "button", "switch", "checkbox", "imageview")) return false
+            if (containsAny(cls, "cardview", "button", "switch", "checkbox")) return false
 
             if (containsAny(idName,
                     "content", "container", "recycler", "list", "prefs", "preference",
@@ -1295,9 +1636,6 @@ object BackgroundApplier {
                     "recyclerview", "nestedscrollview", "scrollview", "listview",
                     "coordinatorlayout", "fragmentcontainerview", "viewpager")) return true
 
-            // HyperOS/MIUIX preference pages often use anonymous FrameLayout/LinearLayout
-            // wrappers with a full-page theme surface. Restrict this fallback to very
-            // large containers so normal preference cards keep their native backgrounds.
             return view is ViewGroup
                 && width >= (rootWidth * 0.90f).toInt()
                 && height >= (rootHeight * 0.62f).toInt()
@@ -1318,42 +1656,37 @@ object BackgroundApplier {
             return false
         }
 
-        // True only for a fully-opaque neutral (black/white/grey) solid background.
-        // Handles ColorDrawable directly; for any other drawable (LayerDrawable,
-        // GradientDrawable, etc.) it samples a *copy* rendered to a 1x1 bitmap so we read
-        // the real composited colour without mutating the shared drawable (beta5 broke the
-        // grey cards by calling setBounds on the live instance — this copies first).
-        // Semi-transparent surfaces (e.g. #24FFFFFF cards) sample with alpha < 255 and are
-        // rejected; coloured panels are non-neutral and rejected.
+        // 沿继承链识别 androidx CardView（含各厂商子类，如 com.miui.support.cardview.CardView），
+        // 不直接引用 androidx.cardview，避免为一个判断引入编译期依赖。
+        private fun isCardView(view: View): Boolean {
+            var type: Class<*>? = view.javaClass
+            while (type != null) {
+                if ("androidx.cardview.widget.CardView" == type.name) return true
+                type = type.superclass
+            }
+            return false
+        }
+
+        // Sample a copy so the live drawable bounds are not changed.
         private fun isOpaqueNeutralColorDrawable(bg: Drawable?): Boolean {
             if (bg == null) return false
-            if (bg is ColorDrawable) {
-                return isOpaqueNeutral(bg.color)
-            }
-            // 非 ColorDrawable 需渲染采样：按 ConstantState 缓存，同一扫描内不重复创建 bitmap。
+            if (bg is ColorDrawable) return isOpaqueNeutral(bg.color)
             val state = bg.constantState
             val cached = if (state == null) null else sampledColors[state]
-            val color: Int
-            if (cached != null) {
-                color = cached
-            } else {
+            val color = if (cached != null) cached else {
                 val sampled = sampleDrawableColor(bg) ?: return false
-                color = sampled
-                if (state != null) sampledColors[state] = color
+                if (state != null) sampledColors[state] = sampled
+                sampled
             }
             return isOpaqueNeutral(color)
         }
 
-        // Renders a COPY of the drawable to a 1x1 bitmap and reads the pixel. Never touches
-        // the original drawable (no setBounds/draw on the live instance).
         private fun sampleDrawableColor(bg: Drawable): Int? {
             return try {
-                val state = bg.constantState ?: return null
-                val copy = state.newDrawable().mutate()
+                val copy = (bg.constantState ?: return null).newDrawable().mutate()
                 val bmp = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
-                val canvas = Canvas(bmp)
                 copy.setBounds(0, 0, 1, 1)
-                copy.draw(canvas)
+                copy.draw(Canvas(bmp))
                 val color = bmp.getPixel(0, 0)
                 bmp.recycle()
                 color
@@ -1362,7 +1695,6 @@ object BackgroundApplier {
             }
         }
 
-        // Fully opaque and neutral (channels close together, no dominant hue): black/white/grey.
         private fun isOpaqueNeutral(color: Int): Boolean {
             if (Color.alpha(color) != 255) return false
             val r = Color.red(color)

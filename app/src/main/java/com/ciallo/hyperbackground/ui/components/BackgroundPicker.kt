@@ -12,6 +12,8 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,9 +22,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -61,6 +61,11 @@ fun BackgroundPickerPreference(
     // 入口/对话框标题可覆盖（默认「设置背景」）：设备卡片页复用本组件时传入「动态背景（可调透明度）」。
     title: String? = null,
     summary: String? = null,
+    // 是否渲染自带的「导出当前图片」行：同一卡片内并列多个槽位（短信主页/聊天）时关闭，
+    // 由外层提供统一的导出下拉。
+    showExport: Boolean = true,
+    // Dialpad blur is configured outside the image dialog, including when no image is selected.
+    showBlurControls: Boolean = true,
 ) {
     val config = activity.config
     // 预览与导出都以「当前实际生效的背景」为准：随机开启且生效时用 random 图，否则手动图。
@@ -107,19 +112,21 @@ fun BackgroundPickerPreference(
         onClick = { showDialog = true },
     )
     // 导出当前生效的背景图到相册（随机图优先）。无背景时点击提示无文件可导出。
-    BasicComponent(
-        title = stringResource(R.string.export_background),
-        summary = if (currentFile.isFile) {
-            stringResource(R.string.export_background_summary, humanSize(currentFile.length()))
-        } else {
-            stringResource(R.string.export_no_file)
-        },
-        enabled = currentFile.isFile,
-        endActions = {
-            Icon(imageVector = MiuixIcons.Basic.ArrowRight, contentDescription = null)
-        },
-        onClick = { activity.exportBackground(slot) },
-    )
+    if (showExport) {
+        BasicComponent(
+            title = stringResource(R.string.export_background),
+            summary = if (currentFile.isFile) {
+                stringResource(R.string.export_background_summary, humanSize(currentFile.length()))
+            } else {
+                stringResource(R.string.export_no_file)
+            },
+            enabled = currentFile.isFile,
+            endActions = {
+                Icon(imageVector = MiuixIcons.Basic.ArrowRight, contentDescription = null)
+            },
+            onClick = { activity.exportBackground(slot) },
+        )
+    }
 
     WindowDialog(
         title = entryTitle,
@@ -136,69 +143,83 @@ fun BackgroundPickerPreference(
             verticalArrangement = Arrangement.spacedBy(6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            BackgroundPreview(
-                activity = activity,
-                file = currentFile,
-                uri = selectedUri,
-                mime = selectedMime ?: currentMime,
-                onClick = {
-                    if (slot == null) {
-                        activity.chooseUiBackground { uri, mime ->
-                            selectedUri = uri
-                            selectedMime = mime
-                        }
-                    } else {
-                        activity.chooseBackground(slot) { uri, mime ->
-                            selectedUri = uri
-                            selectedMime = mime
-                        }
-                    }
-                },
-            )
-            Text(
-                text = when {
-                    selectedUri != null -> selectedMime.orEmpty()
-                    currentFile.isFile -> stringResource(R.string.enabled_size, humanSize(currentFile.length()))
-                    else -> stringResource(R.string.system_default)
-                },
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            )
-            SliderPreference(
-                label = stringResource(R.string.opacity),
-                value = opacity,
-                range = 0f..100f,
-                suffix = "%",
-                onValueChange = { opacity = it },
-                onValueChangeFinished = {},
-            )
-            SwitchPreference(
-                title = stringResource(R.string.background_blur),
-                summary = stringResource(R.string.background_blur_summary),
-                checked = blur,
-                onCheckedChange = { blur = it },
-            )
-            AnimatedVisibility(
-                visible = blur,
-                enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(220)),
-                exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(180)),
+            // 预览 + 滑块放进可滚动区域，并把「剩余高度」让给它（weight）：
+            // Compose 的 Column 会按剩余高度测量子项，内容一旦超出弹窗高度，末尾的按钮行会被
+            // 压成 0 高度而不可见。weight + 滚动后，按钮先测量、永远拿得到自己需要的高度。
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f, fill = false)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                SliderPreference(
-                    label = stringResource(R.string.blur_strength),
-                    value = radius,
-                    range = 0f..80f,
-                    onValueChange = { radius = it },
-                    onValueChangeFinished = {},
+                BackgroundPreview(
+                    activity = activity,
+                    file = currentFile,
+                    uri = selectedUri,
+                    mime = selectedMime ?: currentMime,
+                    onClick = {
+                        if (slot == null) {
+                            activity.chooseUiBackground { uri, mime ->
+                                selectedUri = uri
+                                selectedMime = mime
+                            }
+                        } else {
+                            activity.chooseBackground(slot) { uri, mime ->
+                                selectedUri = uri
+                                selectedMime = mime
+                            }
+                        }
+                    },
                 )
-            }
-            if (brightnessKey != null) {
+                Text(
+                    text = when {
+                        selectedUri != null -> selectedMime.orEmpty()
+                        currentFile.isFile -> stringResource(R.string.enabled_size, humanSize(currentFile.length()))
+                        else -> stringResource(R.string.system_default)
+                    },
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
                 SliderPreference(
-                    label = stringResource(R.string.background_brightness),
-                    value = brightness,
-                    range = BackgroundContract.BRIGHTNESS_MIN.toFloat()..BackgroundContract.BRIGHTNESS_MAX.toFloat(),
+                    label = stringResource(R.string.opacity),
+                    value = opacity,
+                    range = 0f..100f,
                     suffix = "%",
-                    onValueChange = { brightness = it },
+                    onValueChange = { opacity = it },
                     onValueChangeFinished = {},
                 )
+                if (showBlurControls) {
+                    SwitchPreference(
+                        title = stringResource(R.string.background_blur),
+                        summary = stringResource(R.string.background_blur_summary),
+                        checked = blur,
+                        onCheckedChange = { blur = it },
+                    )
+                    AnimatedVisibility(
+                        visible = blur,
+                        enter = expandVertically(animationSpec = tween(300)) + fadeIn(animationSpec = tween(220)),
+                        exit = shrinkVertically(animationSpec = tween(300)) + fadeOut(animationSpec = tween(180)),
+                    ) {
+                        SliderPreference(
+                            label = stringResource(R.string.blur_strength),
+                            value = radius,
+                            range = 0f..80f,
+                            onValueChange = { radius = it },
+                            onValueChangeFinished = {},
+                        )
+                    }
+                }
+                if (brightnessKey != null) {
+                    SliderPreference(
+                        label = stringResource(R.string.background_brightness),
+                        value = brightness,
+                        range = BackgroundContract.BRIGHTNESS_MIN.toFloat()..BackgroundContract.BRIGHTNESS_MAX.toFloat(),
+                        suffix = "%",
+                        onValueChange = { brightness = it },
+                        onValueChangeFinished = {},
+                    )
+                }
             }
             androidx.compose.foundation.layout.Spacer(Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -207,11 +228,9 @@ fun BackgroundPickerPreference(
                     modifier = Modifier.weight(1f),
                     onClick = {
                         if (slot == null) activity.clearUiBackground() else activity.clearBackground(slot)
-                        config.edit()
-                            .putInt(opacityKey, 100)
-                            .putBoolean(blurKey, false)
-                            .putInt(radiusKey, 20)
-                            .apply()
+                        val editor = config.edit().putInt(opacityKey, 100)
+                        if (showBlurControls) editor.putBoolean(blurKey, false).putInt(radiusKey, 20)
+                        editor.apply()
                         if (brightnessKey != null) {
                             config.edit().putInt(brightnessKey, BackgroundContract.BRIGHTNESS_DEFAULT).apply()
                         }
@@ -230,11 +249,9 @@ fun BackgroundPickerPreference(
                             if (slot == null) activity.saveUiBackground(uri, mime)
                             else activity.saveBackground(slot, uri, mime)
                         }
-                        config.edit()
-                            .putInt(opacityKey, opacity.toInt())
-                            .putBoolean(blurKey, blur)
-                            .putInt(radiusKey, radius.toInt())
-                            .apply()
+                        val editor = config.edit().putInt(opacityKey, opacity.toInt())
+                        if (showBlurControls) editor.putBoolean(blurKey, blur).putInt(radiusKey, radius.toInt())
+                        editor.apply()
                         if (brightnessKey != null) {
                             config.edit().putInt(brightnessKey, brightness.toInt()).apply()
                         }
@@ -255,7 +272,10 @@ private fun BackgroundPreview(
     mime: String?,
     onClick: () -> Unit,
 ) {
-    val maxPreviewHeight = (LocalConfiguration.current.screenHeightDp.dp / 2).coerceAtMost(280.dp)
+    // 预览高度按屏幕高度取比例：小屏自动缩小，避免预览把弹窗撑爆（宽度由 0.72 比例反推）。
+    // 注意不要写回「固定宽度 + heightIn + aspectRatio」的组合——AspectRatio 在约束不满足时会
+    // 以 enforceConstraints=false 兜底返回 maxWidth 推导的高度，heightIn 形同虚设。
+    val previewHeight = (LocalConfiguration.current.screenHeightDp.dp * 0.34f).coerceIn(150.dp, 260.dp)
     val bitmap = remember(file.lastModified(), uri, mime) {
         runCatching {
             when {
@@ -276,9 +296,8 @@ private fun BackgroundPreview(
     }
     Box(
         modifier = Modifier
-            .width(200.dp)
-            .heightIn(max = maxPreviewHeight)
-            .aspectRatio(0.72f)
+            .height(previewHeight)
+            .aspectRatio(0.72f, matchHeightConstraintsFirst = true)
             .clip(RoundedCornerShape(20.dp))
             .background(MiuixTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f))
             .clickable(onClick = onClick),
@@ -349,21 +368,30 @@ fun AppearancePickerPreference(
             verticalArrangement = Arrangement.spacedBy(6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            BackgroundPreview(
-                activity = activity,
-                file = currentFile,
-                uri = null,
-                mime = "image/*",
-                onClick = { activity.chooseAppearanceImage(slot, logo) { dismiss?.invoke() } },
-            )
-            Text(
-                text = if (imported) {
-                    stringResource(R.string.enabled_size, humanSize(currentFile.length()))
-                } else {
-                    stringResource(R.string.image_not_imported)
-                },
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f, fill = false)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                BackgroundPreview(
+                    activity = activity,
+                    file = currentFile,
+                    uri = null,
+                    mime = "image/*",
+                    onClick = { activity.chooseAppearanceImage(slot, logo) { dismiss?.invoke() } },
+                )
+                Text(
+                    text = if (imported) {
+                        stringResource(R.string.enabled_size, humanSize(currentFile.length()))
+                    } else {
+                        stringResource(R.string.image_not_imported)
+                    },
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+            }
             androidx.compose.foundation.layout.Spacer(Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 TextButton(

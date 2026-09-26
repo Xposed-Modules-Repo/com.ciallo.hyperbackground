@@ -1,5 +1,6 @@
 package com.ciallo.hyperbackground.appearance
 
+import android.graphics.Canvas
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.RenderEffect
@@ -17,6 +18,9 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.util.Log
 import java.io.IOException
+import java.util.concurrent.Future
+import com.ciallo.hyperbackground.BackgroundImageLoader
+import com.ciallo.hyperbackground.util.FirstFrameCallback
 
 class SettingsBackgroundView(
     context: android.content.Context,
@@ -31,6 +35,24 @@ class SettingsBackgroundView(
     private var videoHeight = 0
     private var hostResumed = true
     private var disposed = false
+    private var videoFrameAvailable = false
+    private val firstFrame = FirstFrameCallback(this)
+    val hasRenderedFrame: Boolean get() = firstFrame.isReady
+    var onFirstFrame: (() -> Unit)?
+        get() = firstFrame.onReady
+        set(value) { firstFrame.onReady = value }
+
+    /** 内容已加载；替换系统背景时使用 onFirstFrame 等待首帧提交。 */
+    var isReady = false
+        private set
+    var loadFailed = false
+        private set
+    private var imageTask: Future<*>? = null
+    var onReady: (() -> Unit)? = null
+        set(value) {
+            field = value
+            if (isReady && !disposed) value?.invoke()
+        }
 
     init {
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO)
@@ -60,6 +82,10 @@ class SettingsBackgroundView(
 
     fun dispose() {
         disposed = true
+        onReady = null
+        firstFrame.dispose()
+        imageTask?.cancel(true)
+        imageTask = null
         (imageDrawable as? AnimatedImageDrawable)?.stop()
         releasePlayer()
         textureView?.surfaceTextureListener = null
@@ -67,30 +93,48 @@ class SettingsBackgroundView(
     }
 
     private fun createImageView() {
-        // 先创建空 ImageView 占位，图片在后台线程解码，避免阻塞主线程导致账号绑定等异步回调延迟。
-        imageView = ImageView(context).also {
+        imageView = object : ImageView(context) {
+            override fun onDraw(canvas: Canvas) {
+                super.onDraw(canvas)
+                if (drawable != null && !loadFailed) firstFrame.afterDraw()
+            }
+        }.also {
             it.scaleType = ImageView.ScaleType.CENTER_CROP
         }
         addView(imageView, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        val uri = source.uri
+        val key = mediaKey(source)
+        val cached = BackgroundImageLoader.cached(resources, key)
+        if (cached != null) {
+            bindImage(cached)
+            return
+        }
         val resolver = context.contentResolver
-        Thread {
-            runCatching {
-                val drawable = ImageDecoder.decodeDrawable(
-                    ImageDecoder.createSource(resolver, uri),
-                )
-                imageDrawable = drawable
-                post {
-                    if (!disposed) {
-                        imageView?.setImageDrawable(drawable)
-                        (drawable as? AnimatedImageDrawable)?.apply {
-                            repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
-                            if (hostResumed) start()
-                        }
-                    }
+        imageTask = BackgroundImageLoader.load(resources, key, source = {
+            ImageDecoder.createSource(resolver, source.uri)
+        }) { result ->
+            post {
+                if (!disposed) result.fold(::bindImage) {
+                    loadFailed = true
+                    Log.e(TAG, "Cannot decode Settings background", it)
                 }
-            }.onFailure { Log.e(TAG, "Cannot decode Settings background", it) }
-        }.start()
+            }
+        }
+    }
+
+    private fun bindImage(drawable: Drawable) {
+        imageDrawable = drawable
+        imageView?.setImageDrawable(drawable)
+        (drawable as? AnimatedImageDrawable)?.apply {
+            repeatCount = AnimatedImageDrawable.REPEAT_INFINITE
+            if (hostResumed) start()
+        }
+        markReady()
+    }
+
+    private fun markReady() {
+        if (disposed || isReady || loadFailed) return
+        isReady = true
+        onReady?.invoke()
     }
 
     private fun createVideoView() {
@@ -104,7 +148,13 @@ class SettingsBackgroundView(
     override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) = startPlayer(surfaceTexture)
     override fun onSurfaceTextureSizeChanged(surfaceTexture: SurfaceTexture, width: Int, height: Int) = updateVideoTransform()
     override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean { releasePlayer(); return true }
-    override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) = Unit
+    override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) {
+        if (disposed || loadFailed) return
+        firstFrame.afterDraw()
+        if (videoFrameAvailable) return
+        videoFrameAvailable = true
+        post { markReady() }
+    }
 
     private fun startPlayer(surfaceTexture: SurfaceTexture) {
         releasePlayer()
@@ -129,10 +179,16 @@ class SettingsBackgroundView(
                     this@SettingsBackgroundView.updateVideoTransform()
                     if (hostResumed) it.start()
                 }
-                setOnErrorListener { _, what, extra -> Log.e(TAG, "Video background failed: $what/$extra"); closeDescriptor(); true }
+                setOnErrorListener { _, what, extra ->
+                    loadFailed = true
+                    Log.e(TAG, "Video background failed: $what/$extra")
+                    closeDescriptor()
+                    true
+                }
                 prepareAsync()
             }
         }.onFailure {
+            loadFailed = true
             Log.e(TAG, "Cannot start Settings video background", it)
             releasePlayer()
         }
@@ -162,5 +218,23 @@ class SettingsBackgroundView(
 
     override fun onDetachedFromWindow() { dispose(); super.onDetachedFromWindow() }
 
-    companion object { private const val TAG = "HyperChangerSettingsAppearance" }
+    companion object {
+        private const val TAG = "HyperChangerSettingsAppearance"
+
+        private fun mediaKey(source: SettingsAppearanceSource) =
+            "${source.uri}:${source.mime}:${source.size}:${source.modified}"
+
+        /** Preload uses the same bounded decoder and pixel cache as visible backgrounds. */
+        fun preload(context: android.content.Context, source: SettingsAppearanceSource) {
+            if (!source.exists || source.isVideo) return
+            val key = mediaKey(source)
+            if (BackgroundImageLoader.cached(context.resources, key) != null) return
+            val resolver = context.contentResolver
+            BackgroundImageLoader.load(context.resources, key, source = {
+                ImageDecoder.createSource(resolver, source.uri)
+            }) { result ->
+                result.onFailure { Log.e(TAG, "Cannot preload Settings background", it) }
+            }
+        }
+    }
 }

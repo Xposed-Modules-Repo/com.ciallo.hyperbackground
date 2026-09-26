@@ -1,7 +1,14 @@
 package com.ciallo.hyperbackground.appearance
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.database.ContentObserver
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import com.ciallo.hyperbackground.util.InvalidatingCache
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class SettingsAppearanceSource(
     val slot: String,
@@ -60,10 +67,13 @@ data class SettingsAppearanceSource(
     val style2BackgroundVerticalOffset: Int,
     val style2BackgroundHorizontalOffset: Int,
     val style2BackgroundScale: Int,
+    val cosCardTitle: String,
+    val cosCardSubtitle: String,
+    val cosCardSignature: String,
 ) {
     val exists: Boolean get() = enabled && size >= 0L
     val isVideo: Boolean get() = mime.startsWith("video/")
-    fun cacheKey(): String = "$slot:$mime:$size:$modified:$enabled:$opacity:$blur:$fontMode:$scale:$logoMode:$lightCardOpacity:$tutorialCardEnabled:$tutorialCardTitle:$tutorialCardSlogan:$tutorialCardAuthor:$tutorialCardImageScale:$tutorialCardLogoScale:$tutorialCardLogoVerticalOffset:$tutorialCardImageLogoSpacing:$tutorialCardTextSpacing:$tutorialCardInfoCardsEnabled:$tutorialCardBackgroundBlur:$tutorialCardBackgroundVerticalOffset:$tutorialCardBackgroundHorizontalOffset:$tutorialCardBackgroundScale:$deviceInterfaceStyle:$style2ImageScale:$style2LogoVerticalOffset:$style2ImageLogoSpacing:$style2LogoHorizontalOffset:$style2LogoAlignment:$style2LogoVersionSpacing:$style2TextEnabled:$style2Text:$style2TextIndependent:$style2TextScale:$style2TextPosition:$style2TextSpacingAbove:$style2TextSpacingBelow:$style2TextAlignment:$style2TextHorizontalOffset:$style2TextHorizontalOffsetLeft:$style2TextHorizontalOffsetCenter:$style2TextHorizontalOffsetRight:$style2TextVerticalOffset:$style2TextVerticalOffsetLeft:$style2TextVerticalOffsetCenter:$style2TextVerticalOffsetRight:$style2LogoColorMode:$style2VersionColorMode:$style2TextColorMode:$style2BackgroundBlur:$style2BackgroundVerticalOffset:$style2BackgroundHorizontalOffset:$style2BackgroundScale"
+    fun cacheKey(): String = "$slot:$mime:$size:$modified:$enabled:$opacity:$blur:$fontMode:$scale:$logoMode:$lightCardOpacity:$tutorialCardEnabled:$tutorialCardTitle:$tutorialCardSlogan:$tutorialCardAuthor:$tutorialCardImageScale:$tutorialCardLogoScale:$tutorialCardLogoVerticalOffset:$tutorialCardImageLogoSpacing:$tutorialCardTextSpacing:$tutorialCardInfoCardsEnabled:$tutorialCardBackgroundBlur:$tutorialCardBackgroundVerticalOffset:$tutorialCardBackgroundHorizontalOffset:$tutorialCardBackgroundScale:$deviceInterfaceStyle:$style2ImageScale:$style2LogoVerticalOffset:$style2ImageLogoSpacing:$style2LogoHorizontalOffset:$style2LogoAlignment:$style2LogoVersionSpacing:$style2TextEnabled:$style2Text:$style2TextIndependent:$style2TextScale:$style2TextPosition:$style2TextSpacingAbove:$style2TextSpacingBelow:$style2TextAlignment:$style2TextHorizontalOffset:$style2TextHorizontalOffsetLeft:$style2TextHorizontalOffsetCenter:$style2TextHorizontalOffsetRight:$style2TextVerticalOffset:$style2TextVerticalOffsetLeft:$style2TextVerticalOffsetCenter:$style2TextVerticalOffsetRight:$style2LogoColorMode:$style2VersionColorMode:$style2TextColorMode:$style2BackgroundBlur:$style2BackgroundVerticalOffset:$style2BackgroundHorizontalOffset:$style2BackgroundScale:$cosCardTitle:$cosCardSubtitle:$cosCardSignature"
 }
 
 fun SettingsAppearanceSource.style2TextHorizontalOffsetForAlignment(): Int = when (style2TextAlignment.coerceIn(0, 2)) {
@@ -79,6 +89,32 @@ fun SettingsAppearanceSource.style2TextVerticalOffsetForAlignment(): Int = when 
 }
 
 object SettingsAppearanceSources {
+    private data class CachedSource(val source: SettingsAppearanceSource, val retryAt: Long)
+    private val cache = InvalidatingCache<String, CachedSource>()
+    private val observing = AtomicBoolean(false)
+    private var preferences: SharedPreferences? = null
+    // SharedPreferences keeps listeners weakly; keep both listeners alive for this process.
+    private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> cache.invalidate() }
+    private val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) = cache.invalidate()
+    }
+
+    fun initialize(value: SharedPreferences) {
+        preferences?.unregisterOnSharedPreferenceChangeListener(preferenceListener)
+        preferences = value
+        value.registerOnSharedPreferenceChangeListener(preferenceListener)
+        cache.invalidate()
+    }
+
+    private fun observe(context: Context) {
+        if (!observing.compareAndSet(false, true)) return
+        runCatching {
+            context.contentResolver.registerContentObserver(
+                Uri.parse("content://$SETTINGS_APPEARANCE_AUTHORITY"), true, observer,
+            )
+        }.onFailure { observing.set(false) }
+    }
+
     fun uri(slot: String) = Uri.Builder()
         .scheme("content")
         .authority(SETTINGS_APPEARANCE_AUTHORITY)
@@ -86,6 +122,18 @@ object SettingsAppearanceSources {
         .build()
 
     fun query(context: Context, slot: String): SettingsAppearanceSource {
+        observe(context)
+        return cache.getOrLoad(slot, { SystemClock.uptimeMillis() < it.retryAt }) {
+            val source = readSource(context, slot)
+            CachedSource(
+                source ?: missing(slot, uri(slot)),
+                // A temporarily unavailable provider must recover without restarting Settings.
+                if (source == null) SystemClock.uptimeMillis() + 1_000L else Long.MAX_VALUE,
+            )
+        }.source
+    }
+
+    private fun readSource(context: Context, slot: String): SettingsAppearanceSource? {
         val uri = uri(slot)
         return runCatching {
             context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -118,7 +166,7 @@ object SettingsAppearanceSources {
                     tutorialCardBackgroundVerticalOffset = cursor.int(SettingsAppearanceProvider.COLUMN_STYLE1_BACKGROUND_VERTICAL_OFFSET).coerceIn(-120, 120),
                     tutorialCardBackgroundHorizontalOffset = cursor.int(SettingsAppearanceProvider.COLUMN_STYLE1_BACKGROUND_HORIZONTAL_OFFSET).coerceIn(-120, 120),
                     tutorialCardBackgroundScale = cursor.int(SettingsAppearanceProvider.COLUMN_STYLE1_BACKGROUND_SCALE).coerceIn(40, 200),
-                    deviceInterfaceStyle = cursor.int(SettingsAppearanceProvider.COLUMN_DEVICE_INTERFACE_STYLE).coerceIn(DEVICE_INTERFACE_STYLE_SYSTEM, DEVICE_INTERFACE_STYLE_TWO),
+                    deviceInterfaceStyle = cursor.int(SettingsAppearanceProvider.COLUMN_DEVICE_INTERFACE_STYLE).coerceIn(DEVICE_INTERFACE_STYLE_SYSTEM, DEVICE_INTERFACE_STYLE_THREE),
                     style2ImageScale = cursor.int(SettingsAppearanceProvider.COLUMN_STYLE2_IMAGE_SCALE).coerceIn(40, 200),
                     style2LogoVerticalOffset = cursor.int(SettingsAppearanceProvider.COLUMN_STYLE2_LOGO_VERTICAL_OFFSET).coerceIn(-120, 120),
                     style2ImageLogoSpacing = cursor.int(SettingsAppearanceProvider.COLUMN_STYLE2_IMAGE_LOGO_SPACING).coerceIn(-50, 50),
@@ -148,9 +196,12 @@ object SettingsAppearanceSources {
                     style2BackgroundVerticalOffset = cursor.int(SettingsAppearanceProvider.COLUMN_STYLE2_BACKGROUND_VERTICAL_OFFSET).coerceIn(-120, 120),
                     style2BackgroundHorizontalOffset = cursor.int(SettingsAppearanceProvider.COLUMN_STYLE2_BACKGROUND_HORIZONTAL_OFFSET).coerceIn(-120, 120),
                     style2BackgroundScale = cursor.int(SettingsAppearanceProvider.COLUMN_STYLE2_BACKGROUND_SCALE).coerceIn(40, 200),
+                    cosCardTitle = cursor.string(SettingsAppearanceProvider.COLUMN_COS_CARD_TITLE).ifBlank { COS_CARD_DEFAULT_TITLE },
+                    cosCardSubtitle = cursor.string(SettingsAppearanceProvider.COLUMN_COS_CARD_SUBTITLE).ifBlank { COS_CARD_DEFAULT_SUBTITLE },
+                    cosCardSignature = cursor.string(SettingsAppearanceProvider.COLUMN_COS_CARD_SIGNATURE).ifBlank { COS_CARD_DEFAULT_SIGNATURE },
                 )
-            } ?: missing(slot, uri)
-        }.getOrElse { missing(slot, uri) }
+            }
+        }.getOrNull()
     }
 
     private fun missing(slot: String, uri: Uri) = SettingsAppearanceSource(
@@ -175,6 +226,9 @@ object SettingsAppearanceSources {
         style2LogoColorMode = 0, style2VersionColorMode = 0, style2TextColorMode = 0,
         style2BackgroundVerticalOffset = 0, style2BackgroundHorizontalOffset = 0,
         style2BackgroundScale = 100,
+        cosCardTitle = COS_CARD_DEFAULT_TITLE,
+        cosCardSubtitle = COS_CARD_DEFAULT_SUBTITLE,
+        cosCardSignature = COS_CARD_DEFAULT_SIGNATURE,
     )
 
     private fun android.database.Cursor.index(name: String) = getColumnIndex(name)
